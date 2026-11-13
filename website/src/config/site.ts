@@ -12,9 +12,9 @@ export const SITE_CONFIG = {
   tagline: 'High-Performance Redis-Compatible In-Memory Database in Pure Java 17',
   description: 'Engineered from first principles with zero external runtime dependencies. Features 57 Redis commands, RESP2 protocol, 256-stripe deadlock-free concurrency, AOF persistence & transactions.',
   
-  // URLs configured via Vite environment variables with fallback
-  githubRepoUrl: import.meta.env.VITE_GITHUB_REPO_URL || '',
-  releaseDownloadUrl: import.meta.env.VITE_RELEASE_DOWNLOAD_URL || '',
+  // Official repository and release artifact endpoints
+  githubRepoUrl: import.meta.env.VITE_GITHUB_REPO_URL || 'https://github.com/krishna18gupta/miniredis-java',
+  releaseDownloadUrl: import.meta.env.VITE_RELEASE_DOWNLOAD_URL || 'https://github.com/krishna18gupta/miniredis-java/releases/download/v1.0.0/miniredis-java-1.0.0.jar',
   docsUrl: '/docs',
   commandsUrl: '/commands',
   benchmarksUrl: '/benchmarks',
