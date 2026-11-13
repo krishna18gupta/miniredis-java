@@ -1,0 +1,36 @@
+name: MiniRedis CI/CD
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build, Test & Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Eclipse Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run Test Suite
+        run: mvn clean test --batch-mode
+
+      - name: Build Executable JAR
+        run: mvn package -DskipTests --batch-mode
+
+      - name: Archive Executable Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: miniredis-executable-jar
+          path: target/miniredis-java-*.jar
+          if-no-files-found: error
