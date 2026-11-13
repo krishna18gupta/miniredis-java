@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Moon, Sun, Menu, X, Github, Terminal } from 'lucide-react';
+import { Moon, Sun, Menu, X, Github, Terminal, Activity } from 'lucide-react';
 import { useTheme } from '../../context/ThemeContext';
 import { Logo } from '../common/Logo';
 import { SITE_CONFIG } from '../../config/site';
 
 const NAV_LINKS = [
   { name: 'Home', path: '/' },
+  { name: 'Dashboard', path: '/dashboard', badge: 'Live' },
   { name: 'Features', path: '/features' },
   { name: 'Architecture', path: '/architecture' },
   { name: 'Docs', path: '/docs' },
@@ -36,14 +37,19 @@ export const Navbar: React.FC = () => {
                 key={link.path}
                 to={link.path}
                 className={({ isActive }) =>
-                  `px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                  `flex items-center space-x-1 px-2.5 py-1.5 rounded-md text-sm font-medium transition-colors ${
                     isActive
                       ? 'text-brand-600 dark:text-brand-400 bg-brand-500/10'
                       : 'text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 hover:bg-zinc-100 dark:hover:bg-zinc-900'
                   }`
                 }
               >
-                {link.name}
+                <span>{link.name}</span>
+                {link.badge && (
+                  <span className="px-1.5 py-0.2 text-[10px] font-bold rounded-full bg-emerald-500 text-white animate-pulse">
+                    {link.badge}
+                  </span>
+                )}
               </NavLink>
             ))}
           </nav>
@@ -78,6 +84,14 @@ export const Navbar: React.FC = () => {
                 <span>v1.0.0</span>
               </NavLink>
             )}
+
+            <NavLink
+              to="/dashboard"
+              className="flex items-center space-x-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:bg-emerald-500 shadow-sm transition-colors"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Live Console</span>
+            </NavLink>
 
             <NavLink
               to="/docs"

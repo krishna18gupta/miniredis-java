@@ -1,0 +1,19 @@
+# ==============================================================================
+# MiniRedis Cloudflare Tunnel (cloudflared) Zero-Cost HTTPS Configuration
+# Provides 100% free SSL, automatic DNS, and DDoS shielding without open ports.
+# ==============================================================================
+
+# Tunnel UUID obtained via: cloudflared tunnel create miniredis-backend
+tunnel: YOUR_TUNNEL_UUID_HERE
+credentials-file: /etc/cloudflared/YOUR_TUNNEL_UUID_HERE.json
+
+ingress:
+  # Route API subdomain to MiniRedis Web Server (HTTP port 8080)
+  - hostname: api.miniredis.yourdomain.com
+    service: http://localhost:8080
+    originRequest:
+      connectTimeout: 5s
+      noTLSVerify: false
+
+  # Default catch-all rule (returns 404 for unmatched hostnames)
+  - service: http_status:404

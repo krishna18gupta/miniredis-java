@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Terminal, Zap, Shield, Database, Lock, Cpu, Server, CheckCircle2 } from 'lucide-react';
+import { ArrowRight, Terminal, Zap, Shield, Database, Lock, Cpu, Server, CheckCircle2, Activity } from 'lucide-react';
 import { SITE_CONFIG } from '../config/site';
 import { ArchitectureDiagram } from '../components/architecture/ArchitectureDiagram';
 import { CodeBlock } from '../components/common/CodeBlock';
@@ -52,6 +52,15 @@ redis-cli -p 6379
         {/* Hero CTAs */}
         <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
           <Link
+            to="/dashboard"
+            className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 rounded-lg font-medium text-sm text-white bg-emerald-600 hover:bg-emerald-500 shadow-sm transition-all"
+          >
+            <Activity className="w-4 h-4 text-emerald-200" />
+            <span>Launch Live Console</span>
+            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-white/20 text-white ml-1">Live</span>
+          </Link>
+
+          <Link
             to="/docs"
             className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 rounded-lg font-medium text-sm text-white bg-brand-600 hover:bg-brand-500 shadow-sm transition-all"
           >
@@ -65,14 +74,6 @@ redis-cli -p 6379
             className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 rounded-lg font-medium text-sm text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800 shadow-sm transition-all"
           >
             <span>Explore 57 Commands</span>
-          </Link>
-
-          <Link
-            to="/benchmarks"
-            className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 rounded-lg font-medium text-sm text-zinc-700 dark:text-zinc-300 bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-800 shadow-sm transition-all"
-          >
-            <Zap className="w-4 h-4 text-amber-500" />
-            <span>View Benchmarks</span>
           </Link>
         </div>
 

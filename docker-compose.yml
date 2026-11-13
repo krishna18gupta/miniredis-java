@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  miniredis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: miniredis-java:1.0.0
+    container_name: miniredis-server
+    restart: unless-stopped
+    ports:
+      # Expose REST API and Web Console
+      - "8080:8080"
+      # Bind Redis TCP port strictly to localhost (prevent public internet exposure)
+      - "127.0.0.1:6379:6379"
+    environment:
+      - MINIREDIS_AOF_DIR=/data
+      - MINIREDIS_DEMO_MODE=false
+      # - MINIREDIS_ADMIN_TOKEN=your_secure_admin_token_here
+    volumes:
+      # Persistent named volume for durability across container restarts
+      - miniredis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  miniredis_data:
+    name: miniredis_persistent_aof

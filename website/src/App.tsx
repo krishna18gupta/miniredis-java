@@ -11,6 +11,7 @@ import { CommandsPage } from './pages/CommandsPage';
 import { BenchmarksPage } from './pages/BenchmarksPage';
 import { DownloadsPage } from './pages/DownloadsPage';
 import { AboutPage } from './pages/AboutPage';
+import { DashboardPage } from './pages/DashboardPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
 export const App: React.FC = () => {
@@ -28,6 +29,7 @@ export const App: React.FC = () => {
               <Route path="/commands" element={<CommandsPage />} />
               <Route path="/benchmarks" element={<BenchmarksPage />} />
               <Route path="/downloads" element={<DownloadsPage />} />
+              <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/about" element={<AboutPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
