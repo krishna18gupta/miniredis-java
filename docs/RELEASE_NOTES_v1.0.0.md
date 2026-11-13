@@ -96,6 +96,39 @@ MiniRedis v1.0.0 is the inaugural production-ready release of an in-memory, thre
 
 ---
 
+## Installation & Execution
+
+### 1. Build and Package
+```bash
+mvn clean package
+```
+
+### 2. Run Database Server
+```bash
+java -jar target/miniredis-java-1.0.0.jar
+```
+- **TCP Server:** `0.0.0.0:6379` (RESP2 protocol)
+- **Embedded Web Console:** `http://localhost:8080`
+- **CLI REPL:** Interactive on stdin
+
+### 3. Connect with redis-cli or Python redis-py
+```bash
+redis-cli -h 127.0.0.1 -p 6379
+```
+*Note: For Python redis-py 8.x, initialize with `protocol=2`.*
+
+---
+
+## Known Limitations
+
+MiniRedis v1.0.0 is an independent, single-instance in-memory database designed for deterministic high-throughput workloads:
+- **RESP2 Protocol Only**: Full RESP2 implementation. RESP3 maps (`%`), sets (`~`), and attributes (`|`) are not supported.
+- **Standalone Instance**: Single-node architecture. Redis Cluster hash slot sharding and master-replica replication are not implemented.
+- **AOF Persistence**: Durability uses Write-Ahead Logging (`appendonly.aof`) with background compaction. Binary RDB snapshotting is not implemented.
+- **Logical Database 0 Only**: Standard single keyspace. `SELECT 0` is supported; non-zero indices return an out-of-range error.
+
+---
+
 ## GitHub Release Checklist
 
 Prior to publishing a public release on GitHub, perform the following verification steps:
