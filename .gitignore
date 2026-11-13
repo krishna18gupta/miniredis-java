@@ -45,3 +45,9 @@ out/
 # Crash dumps & profiling
 hs_err_pid*
 replay_pid*
+
+# Website build & dependencies
+website/node_modules/
+website/dist/
+website/.vite/
+website/npm-debug.log*

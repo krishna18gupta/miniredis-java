@@ -34,3 +34,16 @@ jobs:
           name: miniredis-executable-jar
           path: target/miniredis-java-*.jar
           if-no-files-found: error
+
+      - name: Set up Node.js 20 (Website Build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'website/package-lock.json'
+
+      - name: Verify Website Production Build
+        run: |
+          cd website
+          npm ci
+          npm run build
