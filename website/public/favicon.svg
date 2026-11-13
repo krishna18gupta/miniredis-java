@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="redis-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EF4444" />
+      <stop offset="100%" stop-color="#991B1B" />
+    </linearGradient>
+    <linearGradient id="bolt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="100%" stop-color="#EAB308" />
+    </linearGradient>
+  </defs>
+  <!-- Base Disk 3 -->
+  <path d="M12 40 C12 36 52 36 52 40 L52 48 C52 53 12 53 12 48 Z" fill="url(#redis-grad)" opacity="0.75" />
+  <!-- Base Disk 2 -->
+  <path d="M12 27 C12 23 52 23 52 27 L52 35 C52 40 12 40 12 35 Z" fill="url(#redis-grad)" opacity="0.9" />
+  <!-- Top Disk 1 -->
+  <path d="M12 14 C12 10 52 10 52 14 L52 22 C52 27 12 27 12 22 Z" fill="url(#redis-grad)" />
+  <ellipse cx="32" cy="14" rx="20" ry="6" fill="#F87171" />
+  
+  <!-- In-Memory Speed Lightning Bolt Overlay -->
+  <path d="M35 15 L23 31 L32 31 L29 49 L43 29 L33 29 Z" fill="url(#bolt-grad)" stroke="#18181B" stroke-width="1.5" stroke-linejoin="round" />
+</svg>

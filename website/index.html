@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MiniRedis | Pure Java 17 Redis-Compatible In-Memory Database</title>
+    <meta name="description" content="High-performance, Redis-compatible in-memory database built from scratch in pure Java 17 with zero external runtime dependencies. 57 commands, RESP2, 256-stripe concurrency, AOF persistence & transactions." />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://miniredis.org/" />
+    <meta property="og:title" content="MiniRedis | Pure Java 17 Redis-Compatible In-Memory Database" />
+    <meta property="og:description" content="Zero external runtime dependencies. 57 commands, 256-stripe concurrency, AOF persistence, RESP2, and optimistic CAS transactions." />
+    <meta property="og:image" content="/favicon.svg" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:title" content="MiniRedis | Pure Java 17 Redis-Compatible In-Memory Database" />
+    <meta property="twitter:description" content="High-performance Redis-compatible database engineered in pure Java 17 with 256-stripe lock concurrency and AOF persistence." />
+    <meta property="twitter:image" content="/favicon.svg" />
+
+    <!-- Theme detection / initial set -->
+    <script>
+      (function() {
+        const storedTheme = localStorage.getItem('miniredis-theme');
+        if (storedTheme === 'light') {
+          document.documentElement.classList.remove('dark');
+        } else {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body class="bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100 min-h-screen selection:bg-brand-500 selection:text-white transition-colors duration-200">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
