@@ -24,21 +24,10 @@ import java.util.concurrent.Executors;
 /**
  * Production-ready HTTP Web Server & REST API for MiniRedis.
  * Uses JDK's standard HttpServer to maintain zero external runtime dependencies.
- *
- * Provides endpoints for:
- * - /                 -> Built-in single-page Web Console
- * - /api/health       -> Health check probe
- * - /api/info         -> Server metrics, memory, ops/sec, AOF health, rolling telemetry
- * - /api/keys         -> Keyspace exploration (search, type filter, TTL, inspect, delete)
- * - /api/exec         -> Interactive command execution with rate limiting and demo safety
- * - /api/state        -> Complete keyspace dump and telemetry (legacy compatible)
  */
 public class MiniRedisWebServer {
     public static final String VERSION = "1.0.0";
-    private static final int DEMO_MAX_KEYS = 500;
-    private static final Set<String> DEMO_BLOCKED_COMMANDS = Set.of(
-            "SHUTDOWN", "SAVE", "BGREWRITEAOF", "FLUSHDB", "FLUSHALL", "CONFIG", "BGSAVE"
-    );
+    public static final int MAX_REQUEST_BODY_BYTES = DemoSecurityContext.MAX_BODY_BYTES;
 
     private final int port;
     private final StorageEngine storage;
@@ -46,11 +35,12 @@ public class MiniRedisWebServer {
     private final com.miniredis.server.RedisServer tcpServer;
     private final TelemetrySampler telemetrySampler;
     private final ApiRateLimiter rateLimiter;
+    private final DemoSecurityContext demoSecurity;
     private final long startTimeMillis;
 
     private volatile boolean demoMode;
     private volatile String adminToken;
-    private volatile String corsOrigin = "*";
+    private volatile String corsOrigin;
 
     private HttpServer server;
     private ExecutorService httpExecutor;
@@ -73,7 +63,11 @@ public class MiniRedisWebServer {
         this.adminToken = adminToken;
         this.startTimeMillis = System.currentTimeMillis();
         this.telemetrySampler = new TelemetrySampler(storage, 60);
-        this.rateLimiter = new ApiRateLimiter(60, 5); // 60 burst, 5 req/sec
+        this.rateLimiter = new ApiRateLimiter(60, 2.0); // 60 burst, 2 req/sec refill (120 req/min)
+        this.demoSecurity = new DemoSecurityContext(storage, registry);
+
+        String envCors = System.getenv("MINIREDIS_CORS_ORIGIN");
+        this.corsOrigin = (envCors != null && !envCors.trim().isEmpty()) ? envCors.trim() : "*";
     }
 
     public void setDemoMode(boolean demoMode) {
@@ -96,15 +90,19 @@ public class MiniRedisWebServer {
         this.corsOrigin = (corsOrigin != null && !corsOrigin.trim().isEmpty()) ? corsOrigin.trim() : "*";
     }
 
+    public DemoSecurityContext getDemoSecurity() {
+        return demoSecurity;
+    }
+
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
 
         server.createContext("/", new DashboardHandler());
         server.createContext("/api/health", new HealthHandler(this));
-        server.createContext("/api/info", new InfoHandler(this, storage, tcpServer, telemetrySampler));
-        server.createContext("/api/keys", new KeysHandler(this, storage, rateLimiter));
-        server.createContext("/api/exec", new ExecHandler(this, storage, registry, rateLimiter));
-        server.createContext("/api/state", new StateHandler(this, storage, tcpServer));
+        server.createContext("/api/info", new InfoHandler(this, storage, tcpServer, telemetrySampler, demoSecurity));
+        server.createContext("/api/keys", new KeysHandler(this, storage, rateLimiter, demoSecurity));
+        server.createContext("/api/exec", new ExecHandler(this, storage, registry, rateLimiter, demoSecurity));
+        server.createContext("/api/state", new StateHandler(this, storage, tcpServer, demoSecurity));
 
         httpExecutor = Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "miniredis-http-worker");
@@ -113,10 +111,18 @@ public class MiniRedisWebServer {
         });
         server.setExecutor(httpExecutor);
         telemetrySampler.start();
+
+        if (demoMode) {
+            demoSecurity.start();
+        }
+
         server.start();
     }
 
     public void stop() {
+        if (demoSecurity != null) {
+            demoSecurity.stop();
+        }
         if (telemetrySampler != null) {
             telemetrySampler.stop();
         }
@@ -174,11 +180,19 @@ public class MiniRedisWebServer {
         return "127.0.0.1";
     }
 
+    public static String getSessionId(HttpExchange exchange) {
+        List<String> sess = exchange.getRequestHeaders().get("X-Session-ID");
+        if (sess != null && !sess.isEmpty()) {
+            return sess.get(0).trim();
+        }
+        return null;
+    }
+
     public void sendResponse(HttpExchange exchange, int statusCode, String contentType, byte[] data) throws IOException {
         exchange.getResponseHeaders().set("Content-Type", contentType + "; charset=UTF-8");
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", corsOrigin);
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token");
+        exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token, X-Session-ID");
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
@@ -191,15 +205,26 @@ public class MiniRedisWebServer {
         }
     }
 
-    private static String readRequestBody(HttpExchange exchange) throws IOException {
+    public static String readRequestBody(HttpExchange exchange) throws IOException {
         InputStream is = exchange.getRequestBody();
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         byte[] buffer = new byte[1024];
         int read;
+        int total = 0;
         while ((read = is.read(buffer)) != -1) {
+            total += read;
+            if (total > MAX_REQUEST_BODY_BYTES) {
+                throw new PayloadTooLargeException("Request body exceeds 16 KB limit");
+            }
             baos.write(buffer, 0, read);
         }
         return baos.toString(StandardCharsets.UTF_8);
+    }
+
+    public static class PayloadTooLargeException extends IOException {
+        public PayloadTooLargeException(String msg) {
+            super(msg);
+        }
     }
 
     private static Map<String, String> parseQueryParams(URI uri) {
@@ -254,13 +279,16 @@ public class MiniRedisWebServer {
         private final StorageEngine storage;
         private final com.miniredis.server.RedisServer tcpServer;
         private final TelemetrySampler telemetrySampler;
+        private final DemoSecurityContext demoSecurity;
 
         public InfoHandler(MiniRedisWebServer webServer, StorageEngine storage,
-                           com.miniredis.server.RedisServer tcpServer, TelemetrySampler telemetrySampler) {
+                           com.miniredis.server.RedisServer tcpServer, TelemetrySampler telemetrySampler,
+                           DemoSecurityContext demoSecurity) {
             this.webServer = webServer;
             this.storage = storage;
             this.tcpServer = tcpServer;
             this.telemetrySampler = telemetrySampler;
+            this.demoSecurity = demoSecurity;
         }
 
         @Override
@@ -270,6 +298,10 @@ public class MiniRedisWebServer {
                 return;
             }
 
+            String sessionId = getSessionId(exchange);
+            boolean isAdmin = webServer.isAdminAuthenticated(exchange);
+            boolean isDemo = webServer.isDemoMode() && !isAdmin;
+
             int activeConns = tcpServer != null ? tcpServer.getActiveClientCount() : 0;
             int totalConns = (int) storage.getServerMetrics().getTotalConnectionsReceived();
             long uptimeSec = (System.currentTimeMillis() - webServer.getStartTimeMillis()) / 1000L;
@@ -278,18 +310,38 @@ public class MiniRedisWebServer {
             long opsPerSec = telemetrySampler != null ? telemetrySampler.getCurrentOpsPerSec() : 0;
 
             StorageEngine.KeyspaceStats ks = storage.computeKeyspaceStats();
-            int totalKeys = storage.dbsize();
 
-            // Count keys per type
+            int totalKeys;
             int stringKeys = 0, listKeys = 0, setKeys = 0, hashKeys = 0;
             long now = storage.now();
-            for (Map.Entry<String, RedisValue> entry : storage.getRawStore().entrySet()) {
-                if (entry.getValue().isExpired(now)) continue;
-                switch (entry.getValue().getType()) {
-                    case STRING -> stringKeys++;
-                    case LIST -> listKeys++;
-                    case SET -> setKeys++;
-                    case HASH -> hashKeys++;
+
+            if (isDemo && sessionId != null && DemoSecurityContext.isValidSessionId(sessionId)) {
+                demoSecurity.touchSession(sessionId);
+                // Return counts of demo keys + visitor's session keys
+                Set<String> visibleKeys = new HashSet<>(storage.keys("demo:*"));
+                visibleKeys.addAll(storage.keys(DemoSecurityContext.SESSION_KEY_PREFIX + sessionId + ":*"));
+                totalKeys = visibleKeys.size();
+
+                for (String k : visibleKeys) {
+                    RedisValue val = storage.getRawStore().get(k);
+                    if (val == null || val.isExpired(now)) continue;
+                    switch (val.getType()) {
+                        case STRING -> stringKeys++;
+                        case LIST -> listKeys++;
+                        case SET -> setKeys++;
+                        case HASH -> hashKeys++;
+                    }
+                }
+            } else {
+                totalKeys = storage.dbsize();
+                for (Map.Entry<String, RedisValue> entry : storage.getRawStore().entrySet()) {
+                    if (entry.getValue().isExpired(now)) continue;
+                    switch (entry.getValue().getType()) {
+                        case STRING -> stringKeys++;
+                        case LIST -> listKeys++;
+                        case SET -> setKeys++;
+                        case HASH -> hashKeys++;
+                    }
                 }
             }
 
@@ -313,6 +365,11 @@ public class MiniRedisWebServer {
             sb.append(String.format("\"uptimeSeconds\":%d,", uptimeSec));
             sb.append(String.format("\"demoMode\":%b,", webServer.isDemoMode()));
             sb.append(String.format("\"requiresAuth\":%b,", webServer.getAdminToken() != null && !webServer.getAdminToken().isEmpty()));
+            // Top-level legacy telemetry fields for backward compatibility
+            sb.append(String.format("\"totalConnectionsReceived\":%d,", totalConns));
+            sb.append(String.format("\"keyspaceHits\":%d,", hits));
+            sb.append(String.format("\"keyspaceMisses\":%d,", misses));
+            sb.append(String.format("\"estimatedMemoryBytes\":%d,", ks.estimatedMemoryBytes));
 
             // Keyspace
             sb.append("\"keyspace\":{");
@@ -383,11 +440,13 @@ public class MiniRedisWebServer {
         private final MiniRedisWebServer webServer;
         private final StorageEngine storage;
         private final ApiRateLimiter rateLimiter;
+        private final DemoSecurityContext demoSecurity;
 
-        public KeysHandler(MiniRedisWebServer webServer, StorageEngine storage, ApiRateLimiter rateLimiter) {
+        public KeysHandler(MiniRedisWebServer webServer, StorageEngine storage, ApiRateLimiter rateLimiter, DemoSecurityContext demoSecurity) {
             this.webServer = webServer;
             this.storage = storage;
             this.rateLimiter = rateLimiter;
+            this.demoSecurity = demoSecurity;
         }
 
         @Override
@@ -397,32 +456,57 @@ public class MiniRedisWebServer {
                 return;
             }
 
+            String clientIp = getClientIp(exchange);
+            String sessionId = getSessionId(exchange);
+            boolean isAdmin = webServer.isAdminAuthenticated(exchange);
+            boolean isDemo = webServer.isDemoMode() && !isAdmin;
+
+            if (isDemo) {
+                if (!rateLimiter.allowClient(clientIp, sessionId)) {
+                    webServer.sendResponse(exchange, 429, "application/json",
+                            "{\"status\":\"error\",\"message\":\"Rate limit exceeded. Please wait a moment.\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                if (sessionId != null && !DemoSecurityContext.isValidSessionId(sessionId)) {
+                    webServer.sendResponse(exchange, 400, "application/json",
+                            "{\"status\":\"error\",\"message\":\"Missing or invalid X-Session-ID header (must be 128-bit secure UUID)\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+                if (sessionId != null) {
+                    demoSecurity.touchSession(sessionId);
+                }
+            }
+
             String method = exchange.getRequestMethod().toUpperCase();
             Map<String, String> params = parseQueryParams(exchange.getRequestURI());
 
             if ("DELETE".equals(method)) {
-                handleDeleteKey(exchange, params);
+                handleDeleteKey(exchange, params, isDemo, sessionId);
                 return;
             }
 
             if ("POST".equals(method)) {
-                String body = readRequestBody(exchange).trim();
+                String body;
+                try {
+                    body = readRequestBody(exchange).trim();
+                } catch (PayloadTooLargeException e) {
+                    webServer.sendResponse(exchange, 413, "application/json",
+                            "{\"status\":\"error\",\"message\":\"Payload exceeds 16 KB limit\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
                 if (body.contains("\"action\":\"delete\"") || body.contains("\"delete\"")) {
-                    handleDeleteKey(exchange, params);
+                    handleDeleteKey(exchange, params, isDemo, sessionId);
                     return;
                 }
             }
 
             if ("GET".equals(method)) {
-                // If specific key requested, inspect key
                 String singleKey = params.get("key");
                 if (singleKey != null && !singleKey.isEmpty()) {
-                    handleInspectKey(exchange, singleKey);
+                    handleInspectKey(exchange, singleKey, isDemo, sessionId);
                     return;
                 }
-
-                // Otherwise list keys
-                handleListKeys(exchange, params);
+                handleListKeys(exchange, params, isDemo, sessionId);
                 return;
             }
 
@@ -430,15 +514,17 @@ public class MiniRedisWebServer {
                     "{\"status\":\"error\",\"message\":\"Method Not Allowed\"}".getBytes(StandardCharsets.UTF_8));
         }
 
-        private void handleInspectKey(HttpExchange exchange, String key) throws IOException {
-            RedisValue val = storage.get(key);
+        private void handleInspectKey(HttpExchange exchange, String key, boolean isDemo, String sessionId) throws IOException {
+            String internalKey = (isDemo && sessionId != null) ? DemoSecurityContext.toInternalKey(sessionId, key) : key;
+            RedisValue val = storage.get(internalKey);
+
             if (val == null) {
                 webServer.sendResponse(exchange, 404, "application/json",
                         "{\"status\":\"error\",\"message\":\"Key not found\"}".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
-            long ttl = storage.ttl(key);
+            long ttl = storage.ttl(internalKey);
             String ttlFormatted = (ttl == -1) ? "Persistent" : (ttl + "s");
             String type = val.getType().getTypeName();
 
@@ -493,9 +579,7 @@ public class MiniRedisWebServer {
                         }
                         sb.append("}");
                     }
-                    default -> {
-                        sb.append("\"length\":0,\"value\":\"\"");
-                    }
+                    default -> sb.append("\"length\":0,\"value\":\"\"");
                 }
             }
 
@@ -503,36 +587,54 @@ public class MiniRedisWebServer {
             webServer.sendResponse(exchange, 200, "application/json", sb.toString().getBytes(StandardCharsets.UTF_8));
         }
 
-        private void handleListKeys(HttpExchange exchange, Map<String, String> params) throws IOException {
+        private void handleListKeys(HttpExchange exchange, Map<String, String> params, boolean isDemo, String sessionId) throws IOException {
             String pattern = params.getOrDefault("pattern", "*");
             String typeFilter = params.getOrDefault("type", "all").toLowerCase();
             int limit = 50;
             int offset = 0;
             try {
-                if (params.containsKey("limit")) limit = Math.min(200, Math.max(1, Integer.parseInt(params.get("limit"))));
+                if (params.containsKey("limit")) limit = Math.min(50, Math.max(1, Integer.parseInt(params.get("limit"))));
                 if (params.containsKey("offset")) offset = Math.max(0, Integer.parseInt(params.get("offset")));
             } catch (NumberFormatException ignored) {}
 
-            Set<String> allMatchingKeys = storage.keys(pattern);
-            List<String> filteredKeys = new ArrayList<>();
+            List<String> visibleKeys = new ArrayList<>();
             long now = storage.now();
 
-            for (String k : allMatchingKeys) {
-                RedisValue v = storage.get(k);
-                if (v == null || v.isExpired(now)) continue;
-                if (!"all".equals(typeFilter) && !v.getType().getTypeName().equalsIgnoreCase(typeFilter)) {
-                    continue;
+            if (isDemo && sessionId != null) {
+                // Collect demo:* keys + session keys
+                Set<String> pool = new HashSet<>(storage.keys("demo:*"));
+                pool.addAll(storage.keys(DemoSecurityContext.SESSION_KEY_PREFIX + sessionId + ":*"));
+
+                for (String internalK : pool) {
+                    RedisValue v = storage.get(internalK);
+                    if (v == null || v.isExpired(now)) continue;
+                    if (!"all".equals(typeFilter) && !v.getType().getTypeName().equalsIgnoreCase(typeFilter)) {
+                        continue;
+                    }
+                    String external = DemoSecurityContext.toExternalKey(sessionId, internalK);
+                    if (external != null) {
+                        visibleKeys.add(external);
+                    }
                 }
-                filteredKeys.add(k);
+            } else {
+                Set<String> allKeys = storage.keys(pattern);
+                for (String k : allKeys) {
+                    RedisValue v = storage.get(k);
+                    if (v == null || v.isExpired(now)) continue;
+                    if (!"all".equals(typeFilter) && !v.getType().getTypeName().equalsIgnoreCase(typeFilter)) {
+                        continue;
+                    }
+                    visibleKeys.add(k);
+                }
             }
 
-            Collections.sort(filteredKeys);
-            int total = filteredKeys.size();
+            Collections.sort(visibleKeys);
+            int total = visibleKeys.size();
             int end = Math.min(offset + limit, total);
 
             StringBuilder sb = new StringBuilder("{");
             sb.append("\"status\":\"ok\",");
-            sb.append(String.format("\"totalKeys\":%d,", storage.dbsize()));
+            sb.append(String.format("\"totalKeys\":%d,", total));
             sb.append(String.format("\"matchingKeys\":%d,", total));
             sb.append(String.format("\"offset\":%d,", offset));
             sb.append(String.format("\"limit\":%d,", limit));
@@ -540,11 +642,12 @@ public class MiniRedisWebServer {
 
             for (int i = offset; i < end; i++) {
                 if (i > offset) sb.append(",");
-                String k = filteredKeys.get(i);
-                RedisValue v = storage.get(k);
+                String extK = visibleKeys.get(i);
+                String internalK = (isDemo && sessionId != null) ? DemoSecurityContext.toInternalKey(sessionId, extK) : extK;
+                RedisValue v = storage.getRawStore().get(internalK);
                 if (v == null) continue;
 
-                long ttl = storage.ttl(k);
+                long ttl = storage.ttl(internalK);
                 String ttlFormatted = (ttl == -1) ? "Persistent" : (ttl + "s");
                 String type = v.getType().getTypeName();
                 String preview = "";
@@ -575,7 +678,7 @@ public class MiniRedisWebServer {
 
                 sb.append(String.format(
                         "{\"key\":\"%s\",\"type\":\"%s\",\"ttl\":%d,\"ttlFormatted\":\"%s\",\"isExpiring\":%b,\"size\":%d,\"preview\":\"%s\"}",
-                        JsonUtil.escape(k), type, ttl, ttlFormatted, ttl > 0, size, JsonUtil.escape(preview)
+                        JsonUtil.escape(extK), type, ttl, ttlFormatted, ttl > 0, size, JsonUtil.escape(preview)
                 ));
             }
 
@@ -583,14 +686,7 @@ public class MiniRedisWebServer {
             webServer.sendResponse(exchange, 200, "application/json", sb.toString().getBytes(StandardCharsets.UTF_8));
         }
 
-        private void handleDeleteKey(HttpExchange exchange, Map<String, String> params) throws IOException {
-            String clientIp = getClientIp(exchange);
-            if (!rateLimiter.allowRequest(clientIp)) {
-                webServer.sendResponse(exchange, 429, "application/json",
-                        "{\"status\":\"error\",\"message\":\"Rate limit exceeded. Please wait.\"}".getBytes(StandardCharsets.UTF_8));
-                return;
-            }
-
+        private void handleDeleteKey(HttpExchange exchange, Map<String, String> params, boolean isDemo, String sessionId) throws IOException {
             String key = params.get("key");
             if (key == null || key.trim().isEmpty()) {
                 webServer.sendResponse(exchange, 400, "application/json",
@@ -598,10 +694,24 @@ public class MiniRedisWebServer {
                 return;
             }
 
-            int deleted = storage.del(List.of(key.trim()));
+            String cleanKey = key.trim();
+
+            if (isDemo) {
+                // Immutable demo key check
+                if (DemoSecurityContext.isProtectedDemoKey(cleanKey)) {
+                    webServer.sendResponse(exchange, 403, "application/json",
+                            String.format("{\"status\":\"error\",\"message\":\"Key '%s' is an immutable system demo key and cannot be deleted\"}",
+                                    JsonUtil.escape(cleanKey)).getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+            }
+
+            String internalKey = (isDemo && sessionId != null) ? DemoSecurityContext.toInternalKey(sessionId, cleanKey) : cleanKey;
+            int deleted = storage.del(List.of(internalKey));
+
             if (deleted > 0) {
                 webServer.sendResponse(exchange, 200, "application/json",
-                        String.format("{\"status\":\"ok\",\"deleted\":true,\"key\":\"%s\"}", JsonUtil.escape(key.trim()))
+                        String.format("{\"status\":\"ok\",\"deleted\":true,\"key\":\"%s\"}", JsonUtil.escape(cleanKey))
                                 .getBytes(StandardCharsets.UTF_8));
             } else {
                 webServer.sendResponse(exchange, 404, "application/json",
@@ -618,12 +728,15 @@ public class MiniRedisWebServer {
         private final StorageEngine storage;
         private final CommandRegistry registry;
         private final ApiRateLimiter rateLimiter;
+        private final DemoSecurityContext demoSecurity;
 
-        public ExecHandler(MiniRedisWebServer webServer, StorageEngine storage, CommandRegistry registry, ApiRateLimiter rateLimiter) {
+        public ExecHandler(MiniRedisWebServer webServer, StorageEngine storage, CommandRegistry registry,
+                           ApiRateLimiter rateLimiter, DemoSecurityContext demoSecurity) {
             this.webServer = webServer;
             this.storage = storage;
             this.registry = registry;
             this.rateLimiter = rateLimiter;
+            this.demoSecurity = demoSecurity;
         }
 
         @Override
@@ -634,11 +747,13 @@ public class MiniRedisWebServer {
             }
 
             String clientIp = getClientIp(exchange);
+            String sessionId = getSessionId(exchange);
             boolean isAdmin = webServer.isAdminAuthenticated(exchange);
+            boolean isDemo = webServer.isDemoMode() && !isAdmin;
 
-            if (!isAdmin && webServer.isDemoMode()) {
-                if (!rateLimiter.allowRequest(clientIp)) {
-                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR Rate limit exceeded. Please wait before executing more commands.\"}";
+            if (isDemo) {
+                if (!rateLimiter.allowClient(clientIp, sessionId)) {
+                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR Rate limit exceeded. Please wait a moment.\"}";
                     webServer.sendResponse(exchange, 429, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
                     return;
                 }
@@ -646,7 +761,13 @@ public class MiniRedisWebServer {
 
             String cmdLine = null;
             if ("POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-                cmdLine = readRequestBody(exchange).trim();
+                try {
+                    cmdLine = readRequestBody(exchange).trim();
+                } catch (PayloadTooLargeException e) {
+                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR request body exceeds 16 KB limit\"}";
+                    webServer.sendResponse(exchange, 413, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
             } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
                 String query = exchange.getRequestURI().getQuery();
                 if (query != null && query.startsWith("cmd=")) {
@@ -660,29 +781,34 @@ public class MiniRedisWebServer {
                 return;
             }
 
-            String firstToken = cmdLine.trim().split("\\s+")[0].toUpperCase();
-
-            // Enforce Demo Mode safety rules when caller is not authenticated as admin
-            if (!isAdmin && webServer.isDemoMode()) {
-                if (DEMO_BLOCKED_COMMANDS.contains(firstToken)) {
-                    String errJson = String.format(
-                            "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR command '%s' is disabled in public demo mode to preserve service integrity.\"}",
-                            firstToken
-                    );
+            if (isDemo) {
+                String firstToken = cmdLine.split("\\s+")[0].toUpperCase(Locale.ROOT);
+                if (firstToken.equals("SHUTDOWN") || firstToken.equals("FLUSHDB") || firstToken.equals("FLUSHALL")
+                        || firstToken.equals("CONFIG") || firstToken.equals("SAVE") || firstToken.equals("BGSAVE")
+                        || firstToken.equals("BGREWRITEAOF")) {
+                    String errJson = String.format("{\"status\":\"error\",\"message\":\"Command '%s' is disabled in public demo mode. Self-host MiniRedis to run administrative operations.\"}", firstToken);
                     webServer.sendResponse(exchange, 403, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
                     return;
                 }
-
-                // Check demo keyspace limit on mutating commands
-                if (storage.dbsize() >= DEMO_MAX_KEYS && isPotentialWriteCommand(firstToken)) {
-                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR demo keyspace limit reached (500 keys). Please delete existing keys or run a private self-hosted instance.\"}";
-                    webServer.sendResponse(exchange, 403, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
+                if (sessionId != null && !DemoSecurityContext.isValidSessionId(sessionId)) {
+                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR invalid or missing X-Session-ID header (must be 128-bit secure UUID)\"}";
+                    webServer.sendResponse(exchange, 400, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
                     return;
+                }
+                if (sessionId == null) {
+                    sessionId = "00000000-0000-0000-0000-000000000000";
                 }
             }
 
-            RedisResponse response = registry.dispatch(cmdLine, storage);
+            RedisResponse response;
+            if (isDemo) {
+                response = demoSecurity.executeDemoCommand(sessionId, cmdLine);
+            } else {
+                response = registry.dispatch(cmdLine, storage);
+            }
+
             boolean isError = response.getType() == RedisResponse.ResponseType.ERROR;
+            int statusCode = isError ? (response.toCliString().contains("not permitted") || response.toCliString().contains("immutable") ? 403 : 200) : 200;
 
             String output = JsonUtil.escape(response.toCliString());
             String json = String.format("{\"status\":\"%s\",\"type\":\"%s\",\"output\":\"%s\"}",
@@ -690,29 +816,24 @@ public class MiniRedisWebServer {
                     response.getType().name(),
                     output);
 
-            webServer.sendResponse(exchange, 200, "application/json", json.getBytes(StandardCharsets.UTF_8));
-        }
-
-        private boolean isPotentialWriteCommand(String cmd) {
-            return switch (cmd) {
-                case "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "SADD", "HSET" -> true;
-                default -> false;
-            };
+            webServer.sendResponse(exchange, statusCode, "application/json", json.getBytes(StandardCharsets.UTF_8));
         }
     }
 
     // ==========================================
-    // 5. /api/state (Legacy & Web Console Compatible)
+    // 5. /api/state (Legacy Compatible)
     // ==========================================
     private static class StateHandler implements HttpHandler {
         private final MiniRedisWebServer webServer;
         private final StorageEngine storage;
         private final com.miniredis.server.RedisServer tcpServer;
+        private final DemoSecurityContext demoSecurity;
 
-        public StateHandler(MiniRedisWebServer webServer, StorageEngine storage, com.miniredis.server.RedisServer tcpServer) {
+        public StateHandler(MiniRedisWebServer webServer, StorageEngine storage, com.miniredis.server.RedisServer tcpServer, DemoSecurityContext demoSecurity) {
             this.webServer = webServer;
             this.storage = storage;
             this.tcpServer = tcpServer;
+            this.demoSecurity = demoSecurity;
         }
 
         @Override
@@ -722,16 +843,34 @@ public class MiniRedisWebServer {
                 return;
             }
 
+            String sessionId = getSessionId(exchange);
+            boolean isAdmin = webServer.isAdminAuthenticated(exchange);
+            boolean isDemo = webServer.isDemoMode() && !isAdmin;
+
             StringBuilder sb = new StringBuilder("{\"keys\":[");
             boolean first = true;
-            for (Map.Entry<String, RedisValue> entry : storage.getRawStore().entrySet()) {
-                RedisValue val = entry.getValue();
-                if (val.isExpired(storage.now())) continue;
+            long now = storage.now();
+
+            Set<String> keySet;
+            if (isDemo && sessionId != null && DemoSecurityContext.isValidSessionId(sessionId)) {
+                demoSecurity.touchSession(sessionId);
+                keySet = new HashSet<>(storage.keys("demo:*"));
+                keySet.addAll(storage.keys(DemoSecurityContext.SESSION_KEY_PREFIX + sessionId + ":*"));
+            } else {
+                keySet = storage.getRawStore().keySet();
+            }
+
+            for (String internalK : keySet) {
+                RedisValue val = storage.getRawStore().get(internalK);
+                if (val == null || val.isExpired(now)) continue;
 
                 if (!first) sb.append(",");
                 first = false;
 
-                String k = JsonUtil.escape(entry.getKey());
+                String displayKey = isDemo ? DemoSecurityContext.toExternalKey(sessionId, internalK) : internalK;
+                if (displayKey == null) continue;
+
+                String k = JsonUtil.escape(displayKey);
                 String type = val.getType().getTypeName();
                 String v;
 
@@ -746,7 +885,7 @@ public class MiniRedisWebServer {
                 }
 
                 v = JsonUtil.escape(v.replace("\n", " "));
-                long ttlSecs = storage.ttl(entry.getKey());
+                long ttlSecs = storage.ttl(internalK);
                 String ttlStatus = (ttlSecs == -1) ? "Persistent" : (ttlSecs + "s");
 
                 sb.append(String.format("{\"key\":\"%s\",\"type\":\"%s\",\"value\":\"%s\",\"ttl\":\"%s\",\"isExpiring\":%b}",
@@ -755,7 +894,7 @@ public class MiniRedisWebServer {
             sb.append("],\"stats\":{");
 
             int activeConns = tcpServer != null ? tcpServer.getActiveClientCount() : 0;
-            int activeWorkers = tcpServer != null ? tcpServer.getActiveWorkerThreads() : 0;
+            int activeWorkers = tcpServer != null ? tcpServer.getActiveWorkerThreads() : 50;
             int availWorkers = tcpServer != null ? tcpServer.getAvailableWorkerThreads() : 50;
             int pendingQueue = tcpServer != null ? tcpServer.getPendingQueueTasks() : 0;
             long completedOps = storage.getTotalCompletedOperations();

@@ -1,0 +1,18 @@
+# ==============================================================================
+# Render Blueprint Specification for MiniRedis Free Web Service
+# Docs: https://render.com/docs/blueprint-spec
+# ==============================================================================
+services:
+  - type: web
+    name: miniredis-server
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: MINIREDIS_DEMO_MODE
+        value: "true"
+      - key: MINIREDIS_CORS_ORIGIN
+        value: "*"

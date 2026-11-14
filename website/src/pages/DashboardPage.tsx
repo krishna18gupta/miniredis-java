@@ -16,7 +16,7 @@ export const DashboardPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [refreshInterval, setRefreshInterval] = useState(2000); // 2s default polling
+  const [refreshInterval, setRefreshInterval] = useState(5000); // 5s default polling (gentle on Render free tier)
 
   const [searchPattern, setSearchPattern] = useState('*');
   const [typeFilter, setTypeFilter] = useState('all');

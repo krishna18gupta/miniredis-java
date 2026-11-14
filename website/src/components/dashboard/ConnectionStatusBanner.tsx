@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { RefreshCw, CheckCircle2, AlertTriangle, ShieldCheck, ShieldAlert, Globe, Settings } from 'lucide-react';
+import { RefreshCw, CheckCircle2, ShieldCheck, ShieldAlert, Globe, Settings } from 'lucide-react';
 import { ServerInfo } from './types';
 import { getBackendUrl, setBackendUrl, getAdminToken, setAdminToken } from './api';
 
@@ -68,7 +68,7 @@ export const ConnectionStatusBanner: React.FC<Props> = ({
                 </span>
               )}
               {isConnected && info.demoMode && (
-                <span className="flex items-center space-x-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Destructive commands like SHUTDOWN and FLUSHDB are restricted">
+                <span className="flex items-center space-x-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Visitor isolation active. System demo keys are immutable.">
                   <ShieldAlert className="w-3 h-3" />
                   <span>Public Demo</span>
                 </span>
@@ -80,10 +80,16 @@ export const ConnectionStatusBanner: React.FC<Props> = ({
                 </span>
               )}
             </div>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-              Target Backend: <code className="text-brand-600 dark:text-brand-400 font-mono">{getBackendUrl()}</code>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 flex flex-wrap items-center gap-1.5">
+              <span className="font-medium text-amber-600 dark:text-amber-400">Public Cloud Demo (Ephemeral Durability • In-Memory Core)</span>
+              <span>•</span>
+              <span>Backend:</span>
+              <code className="text-brand-600 dark:text-brand-400 font-mono">{getBackendUrl()}</code>
               {lastUpdated && isConnected && (
-                <span className="ml-2">• Last sync: {lastUpdated.toLocaleTimeString()}</span>
+                <>
+                  <span>•</span>
+                  <span>Last sync: {lastUpdated.toLocaleTimeString()}</span>
+                </>
               )}
             </p>
           </div>
@@ -135,21 +141,32 @@ export const ConnectionStatusBanner: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Disconnected Error Alert */}
+      {/* Disconnected Error Alert with Cold-Start Detection */}
       {!isConnected && (
-        <div className="mt-4 p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-lg flex items-start space-x-3 text-xs text-rose-800 dark:text-rose-300">
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
-          <div className="flex-grow">
-            <p className="font-semibold">Backend Unreachable at {getBackendUrl()}</p>
-            <p className="mt-0.5 text-rose-700 dark:text-rose-400">
-              Ensure MiniRedis is running locally (<code className="font-mono bg-rose-100 dark:bg-rose-900/60 px-1 py-0.5 rounded">java -jar miniredis-java-1.0.0.jar</code>) or update the backend URL below to point to your live cloud deployment.
+        <div className="mt-4 p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-lg flex items-start space-x-3 text-xs text-amber-900 dark:text-amber-200 shadow-sm">
+          <RefreshCw className="w-4 h-4 flex-shrink-0 text-amber-600 dark:text-amber-400 mt-0.5 animate-spin" />
+          <div className="flex-grow space-y-1">
+            <div className="flex items-center space-x-2">
+              <span className="font-semibold text-amber-950 dark:text-amber-100">
+                Render Free backend is waking up (cold start ~50s)...
+              </span>
+              <span className="px-1.5 py-0.2 rounded text-[10px] bg-amber-200/70 dark:bg-amber-800/60 font-medium">
+                Auto-connecting
+              </span>
+            </div>
+            <p className="text-amber-800 dark:text-amber-300">
+              Free cloud containers spin down after 15 minutes of inactivity. MiniRedis is automatically booting in the background and will connect shortly. Telemetry and terminal will activate as soon as the health check passes.
+            </p>
+            <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+              Target REST API: <code className="font-mono bg-amber-100/80 dark:bg-amber-900/60 px-1 py-0.5 rounded text-amber-950 dark:text-amber-200">{getBackendUrl()}</code>
             </p>
           </div>
           <button
             onClick={onRefresh}
-            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white font-medium rounded transition-colors"
+            disabled={loading}
+            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg transition-colors flex-shrink-0 shadow-sm disabled:opacity-50"
           >
-            Retry
+            {loading ? 'Checking...' : 'Check Now'}
           </button>
         </div>
       )}

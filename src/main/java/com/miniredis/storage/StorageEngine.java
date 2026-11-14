@@ -1168,7 +1168,7 @@ public class StorageEngine {
     // Glob Pattern Utility
     // ==========================================
 
-    private Pattern compileGlobToRegex(String glob) {
+    public static Pattern compileGlobToRegex(String glob) {
         if (glob.equals("*")) {
             return Pattern.compile(".*");
         }

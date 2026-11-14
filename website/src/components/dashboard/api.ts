@@ -2,9 +2,28 @@ import { ServerHealth, ServerInfo, KeysListResponse, KeyDetailResponse, CommandE
 
 const STORAGE_KEY_BACKEND_URL = 'miniredis_backend_url';
 const STORAGE_KEY_ADMIN_TOKEN = 'miniredis_admin_token';
+const STORAGE_KEY_SESSION_ID = 'miniredis_visitor_session_id';
 
 export const DEFAULT_BACKEND_URL =
   import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' && window.location.hostname === 'localhost' ? 'http://localhost:8080' : 'http://localhost:8080');
+
+export function getVisitorSessionId(): string {
+  if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000000';
+  let sessionId = sessionStorage.getItem(STORAGE_KEY_SESSION_ID);
+  if (!sessionId) {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      sessionId = crypto.randomUUID();
+    } else if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      sessionId = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    } else {
+      sessionId = 'sess-' + Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    }
+    sessionStorage.setItem(STORAGE_KEY_SESSION_ID, sessionId);
+  }
+  return sessionId;
+}
 
 export function getBackendUrl(): string {
   if (typeof window === 'undefined') return DEFAULT_BACKEND_URL;
@@ -30,6 +49,7 @@ export function setAdminToken(token: string): void {
 function getHeaders(): HeadersInit {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Session-ID': getVisitorSessionId(),
   };
   const token = getAdminToken();
   if (token) {
