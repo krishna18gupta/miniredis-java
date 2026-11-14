@@ -10,9 +10,7 @@ services:
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
     envVars:
-      - key: PORT
-        value: 10000
       - key: MINIREDIS_DEMO_MODE
         value: "true"
       - key: MINIREDIS_CORS_ORIGIN
-        value: "*"
+        value: "https://miniredis-java.pages.dev"
