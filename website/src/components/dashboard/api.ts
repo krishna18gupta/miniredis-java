@@ -5,7 +5,10 @@ const STORAGE_KEY_ADMIN_TOKEN = 'miniredis_admin_token';
 const STORAGE_KEY_SESSION_ID = 'miniredis_visitor_session_id';
 
 export const DEFAULT_BACKEND_URL =
-  import.meta.env.VITE_API_BASE_URL || (typeof window !== 'undefined' && window.location.hostname === 'localhost' ? 'http://localhost:8080' : 'http://localhost:8080');
+  import.meta.env.VITE_API_BASE_URL ||
+  (typeof window !== 'undefined' && window.location.hostname === 'localhost'
+    ? 'http://localhost:8080'
+    : 'https://miniredis-server.onrender.com');
 
 export function getVisitorSessionId(): string {
   if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000000';
