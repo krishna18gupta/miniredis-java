@@ -1,5 +1,6 @@
 package com.miniredis.commands;
 
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import java.util.List;
 
@@ -15,6 +16,15 @@ public class ExistsCommand implements Command {
             return RedisResponse.error("ERR wrong number of arguments for 'exists' command");
         }
         int count = storage.exists(args);
+        return RedisResponse.integer(count);
+    }
+
+    @Override
+    public RedisResponse executeBytes(List<ByteSequence> args, StorageEngine storage) {
+        if (args.isEmpty()) {
+            return RedisResponse.error("ERR wrong number of arguments for 'exists' command");
+        }
+        int count = storage.existsBytes(args);
         return RedisResponse.integer(count);
     }
 }

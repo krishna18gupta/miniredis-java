@@ -557,43 +557,62 @@ public class MiniRedisWebServer {
             synchronized (val) {
                 switch (val.getType()) {
                     case STRING -> {
-                        String s = val.getAsString();
-                        sb.append(String.format("\"length\":%d,", s.length()));
-                        sb.append(String.format("\"value\":\"%s\"", JsonUtil.escape(s)));
+                        com.miniredis.storage.ByteSequence bs = val.getAsByteSequence();
+                        boolean isBinary = !bs.isStrictUtf8();
+                        sb.append(String.format("\"length\":%d,", bs.length()));
+                        sb.append(String.format("\"isBinary\":%b,", isBinary));
+                        if (isBinary) {
+                            sb.append(String.format("\"encoding\":\"base64\",\"value\":\"%s\",\"display\":\"%s\"",
+                                    JsonUtil.escape(bs.toBase64()), JsonUtil.escape(bs.toDisplayString())));
+                        } else {
+                            sb.append(String.format("\"encoding\":\"utf8\",\"value\":\"%s\"", JsonUtil.escape(bs.toUtf8String())));
+                        }
                     }
                     case LIST -> {
-                        Deque<String> list = val.getAsList();
+                        Deque<com.miniredis.storage.ByteSequence> list = val.getAsByteList();
                         sb.append(String.format("\"length\":%d,", list.size()));
                         sb.append("\"value\":[");
                         boolean first = true;
-                        for (String item : list) {
+                        for (com.miniredis.storage.ByteSequence item : list) {
                             if (!first) sb.append(",");
                             first = false;
-                            sb.append(String.format("\"%s\"", JsonUtil.escape(item)));
+                            if (!item.isStrictUtf8()) {
+                                sb.append(String.format("{\"isBinary\":true,\"base64\":\"%s\",\"display\":\"%s\"}",
+                                        JsonUtil.escape(item.toBase64()), JsonUtil.escape(item.toDisplayString())));
+                            } else {
+                                sb.append(String.format("\"%s\"", JsonUtil.escape(item.toUtf8String())));
+                            }
                         }
                         sb.append("]");
                     }
                     case SET -> {
-                        Set<String> set = val.getAsSet();
+                        Set<com.miniredis.storage.ByteSequence> set = val.getAsByteSet();
                         sb.append(String.format("\"length\":%d,", set.size()));
                         sb.append("\"value\":[");
                         boolean first = true;
-                        for (String m : set) {
+                        for (com.miniredis.storage.ByteSequence m : set) {
                             if (!first) sb.append(",");
                             first = false;
-                            sb.append(String.format("\"%s\"", JsonUtil.escape(m)));
+                            if (!m.isStrictUtf8()) {
+                                sb.append(String.format("{\"isBinary\":true,\"base64\":\"%s\",\"display\":\"%s\"}",
+                                        JsonUtil.escape(m.toBase64()), JsonUtil.escape(m.toDisplayString())));
+                            } else {
+                                sb.append(String.format("\"%s\"", JsonUtil.escape(m.toUtf8String())));
+                            }
                         }
                         sb.append("]");
                     }
                     case HASH -> {
-                        Map<String, String> map = val.getAsHash();
+                        Map<com.miniredis.storage.ByteSequence, com.miniredis.storage.ByteSequence> map = val.getAsByteHash();
                         sb.append(String.format("\"length\":%d,", map.size()));
                         sb.append("\"value\":{");
                         boolean first = true;
-                        for (Map.Entry<String, String> e : map.entrySet()) {
+                        for (Map.Entry<com.miniredis.storage.ByteSequence, com.miniredis.storage.ByteSequence> e : map.entrySet()) {
                             if (!first) sb.append(",");
                             first = false;
-                            sb.append(String.format("\"%s\":\"%s\"", JsonUtil.escape(e.getKey()), JsonUtil.escape(e.getValue())));
+                            String kStr = e.getKey().isStrictUtf8() ? e.getKey().toUtf8String() : e.getKey().toDisplayString();
+                            String vStr = e.getValue().isStrictUtf8() ? e.getValue().toUtf8String() : e.getValue().toDisplayString();
+                            sb.append(String.format("\"%s\":\"%s\"", JsonUtil.escape(kStr), JsonUtil.escape(vStr)));
                         }
                         sb.append("}");
                     }

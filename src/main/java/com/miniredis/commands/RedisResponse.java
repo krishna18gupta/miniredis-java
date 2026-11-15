@@ -1,5 +1,7 @@
 package com.miniredis.commands;
 
+import com.miniredis.storage.ByteSequence;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -22,50 +24,66 @@ public class RedisResponse {
 
     private final ResponseType type;
     private final String stringValue;
+    private final ByteSequence byteValue;
     private final Long intValue;
     private final List<RedisResponse> arrayValue;
 
-    private RedisResponse(ResponseType type, String stringValue, Long intValue, List<RedisResponse> arrayValue) {
+    private RedisResponse(ResponseType type, String stringValue, ByteSequence byteValue, Long intValue, List<RedisResponse> arrayValue) {
         this.type = type;
         this.stringValue = stringValue;
+        this.byteValue = byteValue;
         this.intValue = intValue;
         this.arrayValue = arrayValue;
     }
 
     // Factory methods
     public static RedisResponse ok() {
-        return new RedisResponse(ResponseType.SIMPLE_STRING, "OK", null, null);
+        return new RedisResponse(ResponseType.SIMPLE_STRING, "OK", null, null, null);
     }
 
     public static RedisResponse simpleString(String message) {
-        return new RedisResponse(ResponseType.SIMPLE_STRING, message, null, null);
+        return new RedisResponse(ResponseType.SIMPLE_STRING, message, null, null, null);
+    }
+
+    public static RedisResponse bulkString(ByteSequence content) {
+        if (content == null) {
+            return nil();
+        }
+        return new RedisResponse(ResponseType.BULK_STRING, null, content, null, null);
+    }
+
+    public static RedisResponse bulkString(byte[] content) {
+        if (content == null) {
+            return nil();
+        }
+        return new RedisResponse(ResponseType.BULK_STRING, null, ByteSequence.of(content), null, null);
     }
 
     public static RedisResponse bulkString(String content) {
         if (content == null) {
             return nil();
         }
-        return new RedisResponse(ResponseType.BULK_STRING, content, null, null);
+        return new RedisResponse(ResponseType.BULK_STRING, content, ByteSequence.ofUtf8(content), null, null);
     }
 
     public static RedisResponse nil() {
-        return new RedisResponse(ResponseType.NIL, null, null, null);
+        return new RedisResponse(ResponseType.NIL, null, null, null, null);
     }
 
     public static RedisResponse integer(long value) {
-        return new RedisResponse(ResponseType.INTEGER, null, value, null);
+        return new RedisResponse(ResponseType.INTEGER, null, null, value, null);
     }
 
     public static RedisResponse error(String message) {
-        return new RedisResponse(ResponseType.ERROR, message, null, null);
+        return new RedisResponse(ResponseType.ERROR, message, null, null, null);
     }
 
     public static RedisResponse array(List<RedisResponse> elements) {
-        return new RedisResponse(ResponseType.ARRAY, null, null, elements);
+        return new RedisResponse(ResponseType.ARRAY, null, null, null, elements);
     }
 
     public static RedisResponse nullArray() {
-        return new RedisResponse(ResponseType.ARRAY, null, null, null);
+        return new RedisResponse(ResponseType.ARRAY, null, null, null, null);
     }
 
     public static RedisResponse stringList(Collection<String> strings) {
@@ -79,12 +97,39 @@ public class RedisResponse {
         return array(list);
     }
 
+    public static RedisResponse byteList(Collection<ByteSequence> sequences) {
+        if (sequences == null) {
+            return array(Collections.emptyList());
+        }
+        List<RedisResponse> list = new ArrayList<>(sequences.size());
+        for (ByteSequence bs : sequences) {
+            list.add(bulkString(bs));
+        }
+        return array(list);
+    }
+
     public ResponseType getType() {
         return type;
     }
 
     public String getStringValue() {
-        return stringValue;
+        if (stringValue != null) {
+            return stringValue;
+        }
+        if (byteValue != null) {
+            return byteValue.toUtf8String();
+        }
+        return null;
+    }
+
+    public ByteSequence getByteValue() {
+        if (byteValue != null) {
+            return byteValue;
+        }
+        if (stringValue != null) {
+            return ByteSequence.ofUtf8(stringValue);
+        }
+        return null;
     }
 
     public Long getIntValue() {
@@ -103,7 +148,9 @@ public class RedisResponse {
             case SIMPLE_STRING:
                 return stringValue;
             case BULK_STRING:
-                return "\"" + stringValue + "\"";
+                ByteSequence bsCli = getByteValue();
+                if (bsCli == null) return "(nil)";
+                return bsCli.toDisplayString();
             case NIL:
                 return "(nil)";
             case INTEGER:
@@ -150,10 +197,11 @@ public class RedisResponse {
             case INTEGER:
                 return ":" + intValue + "\r\n";
             case BULK_STRING:
-                if (stringValue == null) {
+                ByteSequence bsWire = getByteValue();
+                if (bsWire == null) {
                     return "$-1\r\n";
                 }
-                return "$" + stringValue.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + "\r\n" + stringValue + "\r\n";
+                return "$" + bsWire.length() + "\r\n" + bsWire.toUtf8String() + "\r\n";
             case NIL:
                 return "$-1\r\n";
             case ARRAY:

@@ -2,6 +2,7 @@ package com.miniredis.commands.hashes;
 
 import com.miniredis.commands.Command;
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
@@ -27,6 +28,24 @@ public class HSetCommand implements Command {
         }
         try {
             int newFields = storage.hset(key, fieldValues);
+            return RedisResponse.integer(newFields);
+        } catch (WrongTypeException e) {
+            return RedisResponse.error(e.getMessage());
+        }
+    }
+
+    @Override
+    public RedisResponse executeBytes(List<ByteSequence> args, StorageEngine storage) {
+        if (args.size() < 3 || (args.size() - 1) % 2 != 0) {
+            return RedisResponse.error("ERR wrong number of arguments for 'hset' command");
+        }
+        ByteSequence key = args.get(0);
+        Map<ByteSequence, ByteSequence> fieldValues = new LinkedHashMap<>((args.size() - 1) / 2);
+        for (int i = 1; i < args.size(); i += 2) {
+            fieldValues.put(args.get(i), args.get(i + 1));
+        }
+        try {
+            int newFields = storage.hsetBytes(key, fieldValues);
             return RedisResponse.integer(newFields);
         } catch (WrongTypeException e) {
             return RedisResponse.error(e.getMessage());

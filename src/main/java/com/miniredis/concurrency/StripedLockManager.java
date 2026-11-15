@@ -1,5 +1,7 @@
 package com.miniredis.concurrency;
 
+import com.miniredis.storage.ByteSequence;
+
 import java.util.*;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -46,6 +48,14 @@ public class StripedLockManager {
      */
     public int getStripe(String key) {
         if (key == null) return 0;
+        return getStripe(ByteSequence.ofUtf8(key));
+    }
+
+    /**
+     * Maps a ByteSequence key to a stripe index using bit spreading.
+     */
+    public int getStripe(ByteSequence key) {
+        if (key == null) return 0;
         int h = key.hashCode();
         h ^= (h >>> 16);
         return (h & 0x7FFFFFFF) & mask;
@@ -76,6 +86,16 @@ public class StripedLockManager {
     }
 
     /**
+     * Acquires write lock for a single ByteSequence key.
+     */
+    public LockHandle writeLock(ByteSequence key) {
+        int stripe = getStripe(key);
+        ReentrantReadWriteLock.WriteLock lock = locks[stripe].writeLock();
+        lockWriteWithContention(lock);
+        return lock::unlock;
+    }
+
+    /**
      * Acquires read lock for a single key.
      */
     public LockHandle readLock(String key) {
@@ -83,6 +103,43 @@ public class StripedLockManager {
         ReentrantReadWriteLock.ReadLock lock = locks[stripe].readLock();
         lockReadWithContention(lock);
         return lock::unlock;
+    }
+
+    /**
+     * Acquires read lock for a single ByteSequence key.
+     */
+    public LockHandle readLock(ByteSequence key) {
+        int stripe = getStripe(key);
+        ReentrantReadWriteLock.ReadLock lock = locks[stripe].readLock();
+        lockReadWithContention(lock);
+        return lock::unlock;
+    }
+
+    /**
+     * Acquires write locks for a collection of ByteSequence keys in strictly ascending stripe order.
+     */
+    public LockHandle writeLocksBytes(Collection<ByteSequence> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return () -> {};
+        }
+
+        SortedSet<Integer> stripes = new TreeSet<>();
+        for (ByteSequence key : keys) {
+            if (key != null) {
+                stripes.add(getStripe(key));
+            }
+        }
+
+        List<Integer> sortedStripes = new ArrayList<>(stripes);
+        for (int stripe : sortedStripes) {
+            lockWriteWithContention(locks[stripe].writeLock());
+        }
+
+        return () -> {
+            for (int i = sortedStripes.size() - 1; i >= 0; i--) {
+                locks[sortedStripes.get(i)].writeLock().unlock();
+            }
+        };
     }
 
     /**
@@ -109,6 +166,33 @@ public class StripedLockManager {
         return () -> {
             for (int i = sortedStripes.size() - 1; i >= 0; i--) {
                 locks[sortedStripes.get(i)].writeLock().unlock();
+            }
+        };
+    }
+
+    /**
+     * Acquires read locks for a collection of ByteSequence keys in strictly ascending stripe order.
+     */
+    public LockHandle readLocksBytes(Collection<ByteSequence> keys) {
+        if (keys == null || keys.isEmpty()) {
+            return () -> {};
+        }
+
+        SortedSet<Integer> stripes = new TreeSet<>();
+        for (ByteSequence key : keys) {
+            if (key != null) {
+                stripes.add(getStripe(key));
+            }
+        }
+
+        List<Integer> sortedStripes = new ArrayList<>(stripes);
+        for (int stripe : sortedStripes) {
+            lockReadWithContention(locks[stripe].readLock());
+        }
+
+        return () -> {
+            for (int i = sortedStripes.size() - 1; i >= 0; i--) {
+                locks[sortedStripes.get(i)].readLock().unlock();
             }
         };
     }

@@ -2,6 +2,7 @@ package com.miniredis.commands.lists;
 
 import com.miniredis.commands.Command;
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
@@ -20,6 +21,19 @@ public class RPopCommand implements Command {
         }
         try {
             String val = storage.rpop(args.get(0));
+            return val != null ? RedisResponse.bulkString(val) : RedisResponse.nil();
+        } catch (WrongTypeException e) {
+            return RedisResponse.error(e.getMessage());
+        }
+    }
+
+    @Override
+    public RedisResponse executeBytes(List<ByteSequence> args, StorageEngine storage) {
+        if (args.size() != 1) {
+            return RedisResponse.error("ERR wrong number of arguments for 'rpop' command");
+        }
+        try {
+            ByteSequence val = storage.rpop(args.get(0));
             return val != null ? RedisResponse.bulkString(val) : RedisResponse.nil();
         } catch (WrongTypeException e) {
             return RedisResponse.error(e.getMessage());

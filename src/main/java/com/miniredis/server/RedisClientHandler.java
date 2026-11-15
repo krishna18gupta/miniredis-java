@@ -5,6 +5,7 @@ import com.miniredis.commands.RedisResponse;
 import com.miniredis.protocol.RespParser;
 import com.miniredis.protocol.RespProtocolException;
 import com.miniredis.protocol.RespSerializer;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.ServerMetrics;
 import com.miniredis.storage.StorageEngine;
 
@@ -89,13 +90,13 @@ public class RedisClientHandler implements Runnable, AutoCloseable {
                     break;
                 }
 
-                List<String> tokens = payload.getTokens();
-                if (tokens.isEmpty()) {
+                List<ByteSequence> rawTokens = payload.getRawTokens();
+                if (rawTokens == null || rawTokens.isEmpty()) {
                     continue;
                 }
 
                 lastInteractionMillis = storage.now();
-                String cmdName = tokens.get(0).toUpperCase(Locale.ROOT);
+                String cmdName = rawTokens.get(0).toUtf8String().toUpperCase(Locale.ROOT);
                 lastCommandName = cmdName.toLowerCase(Locale.ROOT);
 
                 if (cmdName.equals("QUIT") || cmdName.equals("EXIT")) {
@@ -110,7 +111,7 @@ public class RedisClientHandler implements Runnable, AutoCloseable {
                 }
 
                 boolean wasInMulti = transactionContext.isInMulti();
-                RedisResponse response = dispatchWithClientSession(tokens, cmdName);
+                RedisResponse response = dispatchWithClientSessionBytes(rawTokens, cmdName);
                 if ("SHUTDOWN".equals(cmdName) && !wasInMulti
                         && response.getType() != RedisResponse.ResponseType.ERROR) {
                     // Redis protocol: SHUTDOWN closes the client connection silently on success
@@ -135,19 +136,19 @@ public class RedisClientHandler implements Runnable, AutoCloseable {
         }
     }
 
-    private RedisResponse dispatchWithClientSession(List<String> tokens, String cmdName) {
+    private RedisResponse dispatchWithClientSessionBytes(List<ByteSequence> tokens, String cmdName) {
         if ("CLIENT".equals(cmdName) && !transactionContext.isInMulti() && tokens.size() >= 2) {
-            String sub = tokens.get(1).toUpperCase(Locale.ROOT);
+            String sub = tokens.get(1).toUtf8String().toUpperCase(Locale.ROOT);
             if ("SETNAME".equals(sub) && tokens.size() == 3) {
-                this.clientName = tokens.get(2);
-                return registry.dispatch(tokens, storage, transactionContext);
+                this.clientName = tokens.get(2).toUtf8String();
+                return registry.dispatchBytes(tokens, storage, transactionContext);
             }
             if ("GETNAME".equals(sub) && tokens.size() == 2) {
                 storage.incrementCompletedOperations();
                 return clientName.isEmpty() ? RedisResponse.nil() : RedisResponse.bulkString(clientName);
             }
         }
-        return registry.dispatch(tokens, storage, transactionContext);
+        return registry.dispatchBytes(tokens, storage, transactionContext);
     }
 
     public ServerMetrics.ClientSnapshot toSnapshot(long nowMillis) {

@@ -2,14 +2,13 @@ package com.miniredis.protocol;
 
 import com.miniredis.commands.CommandRegistry;
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.*;
 
 /**
  * High-performance, streaming RESP2 and inline command parser.
@@ -24,9 +23,8 @@ import java.util.List;
  * - Handles premature EOF and incomplete TCP requests safely.
  *
  * Encoding Model:
- * Bulk strings are decoded using UTF-8 (StandardCharsets.UTF_8). Because the existing
- * StorageEngine stores data as Java Strings, text encoding is strictly UTF-8; raw binary-safe
- * byte-array storage without UTF-8 transcoding will be supported in a future engine evolution.
+ * Fully binary-safe: RESP bulk strings are parsed into immutable ByteSequence buffers
+ * without lossy UTF-8 transcoding.
  */
 public class RespParser {
 
@@ -36,16 +34,41 @@ public class RespParser {
     public static final int DEFAULT_MAX_NESTING_DEPTH = 32;
 
     public static class CommandPayload {
-        private final List<String> tokens;
+        private final List<ByteSequence> rawTokens;
+        private List<String> stringTokens;
         private final boolean respProtocol;
 
-        public CommandPayload(List<String> tokens, boolean respProtocol) {
-            this.tokens = tokens != null ? tokens : Collections.emptyList();
+        public CommandPayload(List<ByteSequence> rawTokens, boolean respProtocol) {
+            this.rawTokens = rawTokens != null ? rawTokens : Collections.emptyList();
             this.respProtocol = respProtocol;
         }
 
+        public static CommandPayload ofStringTokens(List<String> tokens, boolean respProtocol) {
+            if (tokens == null || tokens.isEmpty()) {
+                return new CommandPayload(Collections.emptyList(), respProtocol);
+            }
+            List<ByteSequence> raw = new ArrayList<>(tokens.size());
+            for (String t : tokens) {
+                raw.add(t != null ? ByteSequence.ofUtf8(t) : ByteSequence.EMPTY);
+            }
+            CommandPayload cp = new CommandPayload(raw, respProtocol);
+            cp.stringTokens = Collections.unmodifiableList(new ArrayList<>(tokens));
+            return cp;
+        }
+
+        public List<ByteSequence> getRawTokens() {
+            return rawTokens;
+        }
+
         public List<String> getTokens() {
-            return tokens;
+            if (stringTokens == null) {
+                List<String> list = new ArrayList<>(rawTokens.size());
+                for (ByteSequence b : rawTokens) {
+                    list.add(b != null ? b.toUtf8String() : "");
+                }
+                this.stringTokens = Collections.unmodifiableList(list);
+            }
+            return stringTokens;
         }
 
         public boolean isRespProtocol() {
@@ -53,7 +76,7 @@ public class RespParser {
         }
 
         public String getCommandName() {
-            return tokens.isEmpty() ? "" : tokens.get(0);
+            return rawTokens.isEmpty() ? "" : rawTokens.get(0).toUtf8String().toUpperCase(Locale.ROOT);
         }
     }
 
@@ -90,12 +113,12 @@ public class RespParser {
             if (count <= 0) {
                 return new CommandPayload(Collections.emptyList(), true);
             }
-            List<String> tokens = new ArrayList<>((int) count);
+            List<ByteSequence> rawTokens = new ArrayList<>((int) count);
             for (int i = 0; i < count; i++) {
-                String token = readBulkStringToken(in, maxBulkLen);
-                tokens.add(token != null ? token : "");
+                ByteSequence token = readBulkStringTokenBytes(in, maxBulkLen);
+                rawTokens.add(token != null ? token : ByteSequence.EMPTY);
             }
-            return new CommandPayload(tokens, true);
+            return new CommandPayload(rawTokens, true);
         } else {
             // Inline command fallback
             StringBuilder sb = new StringBuilder();
@@ -119,11 +142,11 @@ public class RespParser {
                 return readCommand(in, maxBulkLen, maxArraySize, maxInlineLen);
             }
             List<String> tokens = CommandRegistry.parseCommandLine(line);
-            return new CommandPayload(tokens, false);
+            return CommandPayload.ofStringTokens(tokens, false);
         }
     }
 
-    private static String readBulkStringToken(InputStream in, int maxBulkLen) throws IOException {
+    private static ByteSequence readBulkStringTokenBytes(InputStream in, int maxBulkLen) throws IOException {
         int prefix = in.read();
         while (prefix == '\r' || prefix == '\n' || prefix == ' ') {
             prefix = in.read();
@@ -144,14 +167,14 @@ public class RespParser {
             }
             byte[] bytes = readExactBytes(in, (int) len);
             readCrLf(in);
-            return new String(bytes, StandardCharsets.UTF_8);
+            return ByteSequence.of(bytes);
         } else if (prefix == '+' || prefix == ':') {
-            return readLine(in, DEFAULT_MAX_INLINE_LENGTH);
+            return ByteSequence.ofUtf8(readLine(in, DEFAULT_MAX_INLINE_LENGTH));
         } else {
             StringBuilder sb = new StringBuilder();
             sb.append((char) prefix);
             sb.append(readLine(in, DEFAULT_MAX_INLINE_LENGTH));
-            return sb.toString();
+            return ByteSequence.ofUtf8(sb.toString());
         }
     }
 
@@ -198,7 +221,7 @@ public class RespParser {
                 }
                 byte[] bytes = readExactBytes(in, (int) len);
                 readCrLf(in);
-                return RedisResponse.bulkString(new String(bytes, StandardCharsets.UTF_8));
+                return RedisResponse.bulkString(ByteSequence.of(bytes));
             }
             case '*': { // Array
                 long count = readLong(in);
@@ -248,6 +271,15 @@ public class RespParser {
         } catch (NumberFormatException e) {
             throw new RespProtocolException("Malformed integer in RESP stream: '" + line + "'", e);
         }
+    }
+
+    public static ByteSequence readBulkStringBytes(InputStream in, int maxBulkLen) throws IOException {
+        return readBulkStringTokenBytes(in, maxBulkLen);
+    }
+
+    public static String readBulkString(InputStream in, int maxBulkLen) throws IOException {
+        ByteSequence bs = readBulkStringTokenBytes(in, maxBulkLen);
+        return bs != null ? bs.toUtf8String() : null;
     }
 
     private static byte[] readExactBytes(InputStream in, int length) throws IOException {

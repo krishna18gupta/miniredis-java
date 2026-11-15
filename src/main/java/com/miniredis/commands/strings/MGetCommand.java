@@ -2,6 +2,7 @@ package com.miniredis.commands.strings;
 
 import com.miniredis.commands.Command;
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.RedisDataType;
 import com.miniredis.storage.RedisValue;
 import com.miniredis.storage.StorageEngine;
@@ -26,7 +27,24 @@ public class MGetCommand implements Command {
             if (val == null || val.getType() != RedisDataType.STRING) {
                 responses.add(RedisResponse.nil());
             } else {
-                responses.add(RedisResponse.bulkString(val.getAsString()));
+                responses.add(RedisResponse.bulkString(val.getAsByteSequence()));
+            }
+        }
+        return RedisResponse.array(responses);
+    }
+
+    @Override
+    public RedisResponse executeBytes(List<ByteSequence> args, StorageEngine storage) {
+        if (args.isEmpty()) {
+            return RedisResponse.error("ERR wrong number of arguments for 'mget' command");
+        }
+        List<RedisValue> values = storage.mgetBytes(args);
+        List<RedisResponse> responses = new ArrayList<>(values.size());
+        for (RedisValue val : values) {
+            if (val == null || val.getType() != RedisDataType.STRING) {
+                responses.add(RedisResponse.nil());
+            } else {
+                responses.add(RedisResponse.bulkString(val.getAsByteSequence()));
             }
         }
         return RedisResponse.array(responses);

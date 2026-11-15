@@ -1,10 +1,12 @@
 package com.miniredis.protocol;
 
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -28,6 +30,20 @@ public class RespSerializer {
         if (tokens == null || tokens.isEmpty()) {
             return EMPTY_ARRAY;
         }
+        List<ByteSequence> byteTokens = new ArrayList<>(tokens.size());
+        for (String t : tokens) {
+            byteTokens.add(t != null ? ByteSequence.ofUtf8(t) : null);
+        }
+        return encodeCommandBytes(byteTokens);
+    }
+
+    /**
+     * Serializes raw binary ByteSequence command tokens directly into RESP wire format.
+     */
+    public static byte[] encodeCommandBytes(List<ByteSequence> tokens) {
+        if (tokens == null || tokens.isEmpty()) {
+            return EMPTY_ARRAY;
+        }
 
         ByteArrayOutputStream out = new ByteArrayOutputStream(64 * tokens.size());
         try {
@@ -35,15 +51,14 @@ public class RespSerializer {
             out.write(Integer.toString(tokens.size()).getBytes(StandardCharsets.US_ASCII));
             out.write(CRLF);
 
-            for (String token : tokens) {
+            for (ByteSequence token : tokens) {
                 if (token == null) {
                     out.write(NULL_BULK);
                 } else {
-                    byte[] bytes = token.getBytes(StandardCharsets.UTF_8);
                     out.write('$');
-                    out.write(Integer.toString(bytes.length).getBytes(StandardCharsets.US_ASCII));
+                    out.write(Integer.toString(token.length()).getBytes(StandardCharsets.US_ASCII));
                     out.write(CRLF);
-                    out.write(bytes);
+                    token.writeTo(out);
                     out.write(CRLF);
                 }
             }
@@ -89,17 +104,16 @@ public class RespSerializer {
                 out.write(CRLF);
                 break;
             case BULK_STRING:
-                String str = resp.getStringValue();
-                if (str == null) {
+                ByteSequence bs = resp.getByteValue();
+                if (bs == null) {
                     out.write(NULL_BULK);
-                } else if (str.isEmpty()) {
+                } else if (bs.isEmpty()) {
                     out.write(EMPTY_BULK);
                 } else {
-                    byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
                     out.write('$');
-                    out.write(Integer.toString(bytes.length).getBytes(StandardCharsets.US_ASCII));
+                    out.write(Integer.toString(bs.length()).getBytes(StandardCharsets.US_ASCII));
                     out.write(CRLF);
-                    out.write(bytes);
+                    bs.writeTo(out);
                     out.write(CRLF);
                 }
                 break;

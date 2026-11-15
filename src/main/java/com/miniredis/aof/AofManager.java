@@ -5,6 +5,7 @@ import com.miniredis.commands.RedisResponse;
 import com.miniredis.protocol.RespParser;
 import com.miniredis.protocol.RespProtocolException;
 import com.miniredis.protocol.RespSerializer;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.RedisDataType;
 import com.miniredis.storage.RedisValue;
 import com.miniredis.storage.StorageEngine;
@@ -146,7 +147,7 @@ public class AofManager implements AutoCloseable {
         suspended = true;
         int replayedCount = 0;
         boolean inTransaction = false;
-        List<List<String>> txBuffer = new ArrayList<>();
+        List<List<ByteSequence>> txBufferBytes = new ArrayList<>();
 
         try (InputStream in = new BufferedInputStream(new FileInputStream(aofFile))) {
             while (true) {
@@ -173,35 +174,35 @@ public class AofManager implements AutoCloseable {
                     break; // Normal EOF
                 }
 
-                List<String> tokens = payload.getTokens();
-                if (!tokens.isEmpty()) {
-                    String cmdUpper = tokens.get(0).toUpperCase(Locale.ROOT);
+                List<ByteSequence> rawTokens = payload.getRawTokens();
+                if (rawTokens != null && !rawTokens.isEmpty()) {
+                    String cmdUpper = rawTokens.get(0).toUtf8String().toUpperCase(Locale.ROOT);
                     if ("MULTI".equals(cmdUpper)) {
                         if (inTransaction) {
                             // Previous transaction never finished with EXEC
                             recoveryErrors++;
                         }
                         inTransaction = true;
-                        txBuffer.clear();
+                        txBufferBytes.clear();
                     } else if ("EXEC".equals(cmdUpper)) {
                         if (!inTransaction) {
                             recoveryErrors++;
                         } else {
-                            for (List<String> txCmd : txBuffer) {
-                                RedisResponse resp = registry.dispatch(txCmd, storage);
+                            for (List<ByteSequence> txCmd : txBufferBytes) {
+                                RedisResponse resp = registry.dispatchBytes(txCmd, storage);
                                 if (resp != null && resp.getType() != RedisResponse.ResponseType.ERROR) {
                                     replayedCount++;
                                 } else {
                                     recoveryErrors++;
                                 }
                             }
-                            txBuffer.clear();
+                            txBufferBytes.clear();
                             inTransaction = false;
                         }
                     } else if (inTransaction) {
-                        txBuffer.add(tokens);
+                        txBufferBytes.add(rawTokens);
                     } else {
-                        RedisResponse resp = registry.dispatch(tokens, storage);
+                        RedisResponse resp = registry.dispatchBytes(rawTokens, storage);
                         if (resp != null && resp.getType() != RedisResponse.ResponseType.ERROR) {
                             replayedCount++;
                         } else {
@@ -213,7 +214,7 @@ public class AofManager implements AutoCloseable {
 
             // Never replay an incomplete trailing transaction missing EXEC
             if (inTransaction) {
-                txBuffer.clear();
+                txBufferBytes.clear();
                 recoveryErrors++;
                 healthStatus = AofHealth.Status.DEGRADED;
                 lastError = "AOF Recovery discarded incomplete trailing transaction";
@@ -245,6 +246,15 @@ public class AofManager implements AutoCloseable {
         appendEncodedBlock(encoded, 1);
     }
 
+    public void appendCommandBytes(List<ByteSequence> tokens) {
+        if (closed || suspended || tokens == null || tokens.isEmpty()) {
+            return;
+        }
+
+        byte[] encoded = RespSerializer.encodeCommandBytes(tokens);
+        appendEncodedBlock(encoded, 1);
+    }
+
     /**
      * Atomically appends an entire committed transaction wrapped in MULTI ... EXEC
      * under a single writeLock section so concurrent writers never interleave.
@@ -260,6 +270,27 @@ public class AofManager implements AutoCloseable {
             for (List<String> cmd : commands) {
                 if (cmd != null && !cmd.isEmpty()) {
                     baos.write(RespSerializer.encodeCommand(cmd));
+                }
+            }
+            baos.write(RespSerializer.encodeCommand(List.of("EXEC")));
+        } catch (IOException e) {
+            throw new AofException("Failed to serialize AOF transaction block", e);
+        }
+
+        appendEncodedBlock(baos.toByteArray(), commands.size() + 2);
+    }
+
+    public void appendTransactionBytes(List<List<ByteSequence>> commands) {
+        if (closed || suspended || commands == null || commands.isEmpty()) {
+            return;
+        }
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(commands.size() * 64 + 64);
+        try {
+            baos.write(RespSerializer.encodeCommand(List.of("MULTI")));
+            for (List<ByteSequence> cmd : commands) {
+                if (cmd != null && !cmd.isEmpty()) {
+                    baos.write(RespSerializer.encodeCommandBytes(cmd));
                 }
             }
             baos.write(RespSerializer.encodeCommand(List.of("EXEC")));
@@ -394,61 +425,61 @@ public class AofManager implements AutoCloseable {
             BufferedOutputStream bufOut = new BufferedOutputStream(tempOut);
             try {
                 for (StorageEngine.SnapshotEntry entry : snapshot) {
-                    String key = entry.key;
+                    ByteSequence key = entry.keyBytes != null ? entry.keyBytes : ByteSequence.ofUtf8(entry.key);
                     RedisValue val = entry.value;
                     Long expireAt = entry.expireAt;
 
-                    List<List<String>> commandsToLog = new ArrayList<>();
+                    List<List<ByteSequence>> commandsToLog = new ArrayList<>();
 
                     if (val.getType() == RedisDataType.STRING) {
                         if (expireAt != null) {
-                            commandsToLog.add(List.of("SET", key, val.getAsString(), "PXAT", String.valueOf(expireAt)));
+                            commandsToLog.add(List.of(ByteSequence.ofAscii("SET"), key, val.getAsByteSequence(), ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(expireAt))));
                         } else {
-                            commandsToLog.add(List.of("SET", key, val.getAsString()));
+                            commandsToLog.add(List.of(ByteSequence.ofAscii("SET"), key, val.getAsByteSequence()));
                         }
                     } else if (val.getType() == RedisDataType.LIST) {
-                        Deque<String> list = val.getAsList();
+                        Deque<ByteSequence> list = val.getAsByteList();
                         if (!list.isEmpty()) {
-                            List<String> rpush = new ArrayList<>(list.size() + 2);
-                            rpush.add("RPUSH");
+                            List<ByteSequence> rpush = new ArrayList<>(list.size() + 2);
+                            rpush.add(ByteSequence.ofAscii("RPUSH"));
                             rpush.add(key);
                             rpush.addAll(list);
                             commandsToLog.add(rpush);
                         }
                         if (expireAt != null) {
-                            commandsToLog.add(List.of("PEXPIREAT", key, String.valueOf(expireAt)));
+                            commandsToLog.add(List.of(ByteSequence.ofAscii("PEXPIREAT"), key, ByteSequence.ofAscii(String.valueOf(expireAt))));
                         }
                     } else if (val.getType() == RedisDataType.SET) {
-                        Set<String> set = val.getAsSet();
+                        Set<ByteSequence> set = val.getAsByteSet();
                         if (!set.isEmpty()) {
-                            List<String> sadd = new ArrayList<>(set.size() + 2);
-                            sadd.add("SADD");
+                            List<ByteSequence> sadd = new ArrayList<>(set.size() + 2);
+                            sadd.add(ByteSequence.ofAscii("SADD"));
                             sadd.add(key);
                             sadd.addAll(set);
                             commandsToLog.add(sadd);
                         }
                         if (expireAt != null) {
-                            commandsToLog.add(List.of("PEXPIREAT", key, String.valueOf(expireAt)));
+                            commandsToLog.add(List.of(ByteSequence.ofAscii("PEXPIREAT"), key, ByteSequence.ofAscii(String.valueOf(expireAt))));
                         }
                     } else if (val.getType() == RedisDataType.HASH) {
-                        Map<String, String> map = val.getAsHash();
+                        Map<ByteSequence, ByteSequence> map = val.getAsByteHash();
                         if (!map.isEmpty()) {
-                            List<String> hset = new ArrayList<>(map.size() * 2 + 2);
-                            hset.add("HSET");
+                            List<ByteSequence> hset = new ArrayList<>(map.size() * 2 + 2);
+                            hset.add(ByteSequence.ofAscii("HSET"));
                             hset.add(key);
-                            for (Map.Entry<String, String> fieldEntry : map.entrySet()) {
+                            for (Map.Entry<ByteSequence, ByteSequence> fieldEntry : map.entrySet()) {
                                 hset.add(fieldEntry.getKey());
                                 hset.add(fieldEntry.getValue());
                             }
                             commandsToLog.add(hset);
                         }
                         if (expireAt != null) {
-                            commandsToLog.add(List.of("PEXPIREAT", key, String.valueOf(expireAt)));
+                            commandsToLog.add(List.of(ByteSequence.ofAscii("PEXPIREAT"), key, ByteSequence.ofAscii(String.valueOf(expireAt))));
                         }
                     }
 
-                    for (List<String> cmd : commandsToLog) {
-                        byte[] bytes = RespSerializer.encodeCommand(cmd);
+                    for (List<ByteSequence> cmd : commandsToLog) {
+                        byte[] bytes = RespSerializer.encodeCommandBytes(cmd);
                         bufOut.write(bytes);
                     }
                 }

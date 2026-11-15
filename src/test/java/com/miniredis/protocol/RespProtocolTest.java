@@ -337,4 +337,49 @@ public class RespProtocolTest {
             RespParser.readCommand(new ByteArrayInputStream(truncatedBulk.getBytes(StandardCharsets.UTF_8)));
         });
     }
+
+    @Test
+    @DisplayName("Stage A2: Binary-safe bulk string parsing & serialization preserving arbitrary bytes")
+    public void testBinarySafeBulkStringSerializationAndParsing() throws IOException {
+        // Contains null byte, embedded \r\n, and non-UTF8 byte 0xFF
+        byte[] rawPayload = new byte[]{'H', 'e', 0, 'l', '\r', '\n', 'o', (byte) 0xFF, (byte) 0xFE, 127};
+
+        RedisResponse response = RedisResponse.bulkString(rawPayload);
+        byte[] wire = RespSerializer.serializeResponse(response);
+
+        // Verify wire framing starts with $10\r\n
+        String header = "$" + rawPayload.length + "\r\n";
+        byte[] expectedHeader = header.getBytes(StandardCharsets.US_ASCII);
+        for (int i = 0; i < expectedHeader.length; i++) {
+            assertEquals(expectedHeader[i], wire[i]);
+        }
+
+        // Parse wire back and verify exact byte preservation
+        RedisResponse parsed = RespParser.parseResponse(new ByteArrayInputStream(wire));
+        assertNotNull(parsed);
+        assertEquals(RedisResponse.ResponseType.BULK_STRING, parsed.getType());
+        assertNotNull(parsed.getByteValue());
+        assertArrayEquals(rawPayload, parsed.getByteValue().toByteArray());
+    }
+
+    @Test
+    @DisplayName("Stage A2: Command payload raw binary token preservation")
+    public void testBinaryCommandPayloadPreservation() throws IOException {
+        byte[] binaryKey = new byte[]{'k', 'e', 'y', 0, 1};
+        byte[] binaryVal = new byte[]{(byte) 0x80, (byte) 0x81, '\r', '\n', 0};
+
+        byte[] commandWire = RespSerializer.encodeCommandBytes(List.of(
+                com.miniredis.storage.ByteSequence.ofUtf8("SET"),
+                com.miniredis.storage.ByteSequence.of(binaryKey),
+                com.miniredis.storage.ByteSequence.of(binaryVal)
+        ));
+
+        RespParser.CommandPayload payload = RespParser.readCommand(new ByteArrayInputStream(commandWire));
+        assertNotNull(payload);
+        assertTrue(payload.isRespProtocol());
+        assertEquals("SET", payload.getCommandName());
+        assertEquals(3, payload.getRawTokens().size());
+        assertArrayEquals(binaryKey, payload.getRawTokens().get(1).toByteArray());
+        assertArrayEquals(binaryVal, payload.getRawTokens().get(2).toByteArray());
+    }
 }

@@ -15,17 +15,21 @@ import java.util.regex.Pattern;
 
 /**
  * Thread-safe In-Memory Storage Engine for MiniRedis.
- * Backed by ConcurrentHashMap<String, RedisValue> and StripedLockManager for fine-grained,
+ * Backed by ConcurrentHashMap<ByteSequence, RedisValue> and StripedLockManager for fine-grained,
  * deadlock-free concurrency across 256 lock stripes.
+ *
+ * Binary Safety:
+ * Keys and String/List/Set/Hash values are stored and manipulated natively as immutable ByteSequence objects.
+ * Arbitrary byte sequences including 0x00, CRLF, and non-UTF-8 bytes are completely preserved.
+ * Backward-compatible String overloads transcode on demand at the boundary for legacy callers.
  *
  * Timing Model:
  * Relies on a standard wall-clock model via java.time.Clock (defaulting to system UTC).
- * Limitations: System clock skews, NTP step adjustments, or leap seconds can alter remaining
- * TTL calculations. Injectable Clock allows completely deterministic time simulation in tests.
+ * Injectable Clock allows completely deterministic time simulation in tests.
  */
 public class StorageEngine {
-    private final ConcurrentHashMap<String, RedisValue> store;
-    private final ConcurrentHashMap<String, AtomicLong> keyVersions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ByteSequence, RedisValue> store;
+    private final ConcurrentHashMap<ByteSequence, AtomicLong> keyVersions = new ConcurrentHashMap<>();
     private final AtomicLong globalFlushEpoch = new AtomicLong(0);
     private final StripedLockManager stripedLocks;
     private final java.util.concurrent.atomic.LongAdder totalCompletedOperations = new java.util.concurrent.atomic.LongAdder();
@@ -93,38 +97,68 @@ public class StorageEngine {
         return clock.millis();
     }
 
-    public void bumpKeyVersion(String key) {
+    public void bumpKeyVersion(ByteSequence key) {
         if (key != null) {
             keyVersions.computeIfAbsent(key, k -> new AtomicLong(0)).incrementAndGet();
         }
     }
 
-    public long getKeyVersion(String key) {
+    public void bumpKeyVersion(String key) {
+        if (key != null) {
+            bumpKeyVersion(ByteSequence.ofUtf8(key));
+        }
+    }
+
+    public long getKeyVersion(ByteSequence key) {
         if (key == null) return 0L;
         AtomicLong counter = keyVersions.get(key);
         return counter != null ? counter.get() : 0L;
     }
 
+    public long getKeyVersion(String key) {
+        if (key == null) return 0L;
+        return getKeyVersion(ByteSequence.ofUtf8(key));
+    }
+
     public static class WatchSnapshot {
+        public final ByteSequence keyBytes;
         public final String key;
         public final long version;
         public final long flushEpoch;
         public final boolean activeAtWatch;
 
-        public WatchSnapshot(String key, long version, long flushEpoch, boolean activeAtWatch) {
-            this.key = key;
+        public WatchSnapshot(ByteSequence key, long version, long flushEpoch, boolean activeAtWatch) {
+            this.keyBytes = key;
+            this.key = key != null ? key.toUtf8String() : null;
             this.version = version;
             this.flushEpoch = flushEpoch;
             this.activeAtWatch = activeAtWatch;
         }
+
+        public WatchSnapshot(String key, long version, long flushEpoch, boolean activeAtWatch) {
+            this(key != null ? ByteSequence.ofUtf8(key) : null, version, flushEpoch, activeAtWatch);
+        }
+
+        public String getKey() {
+            return key;
+        }
+
+        public ByteSequence getKeyBytes() {
+            return keyBytes;
+        }
     }
 
-    public WatchSnapshot captureWatch(String key) {
+    public WatchSnapshot captureWatch(ByteSequence key) {
         Objects.requireNonNull(key, "key cannot be null");
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             boolean active = getInternal(key) != null;
             return new WatchSnapshot(key, getKeyVersion(key), globalFlushEpoch.get(), active);
         }
+    }
+
+    public WatchSnapshot captureWatch(String key) {
+        Objects.requireNonNull(key, "key cannot be null");
+        return captureWatch(ByteSequence.ofUtf8(key));
     }
 
     /**
@@ -135,11 +169,12 @@ public class StorageEngine {
         if (snapshot.flushEpoch != globalFlushEpoch.get()) {
             return false;
         }
-        boolean currentlyActive = getInternal(snapshot.key) != null;
+        ByteSequence k = snapshot.keyBytes != null ? snapshot.keyBytes : ByteSequence.ofUtf8(snapshot.key);
+        boolean currentlyActive = getInternal(k) != null;
         if (snapshot.activeAtWatch && !currentlyActive) {
             return false;
         }
-        return getKeyVersion(snapshot.key) == snapshot.version;
+        return getKeyVersion(k) == snapshot.version;
     }
 
     /**
@@ -157,7 +192,7 @@ public class StorageEngine {
     /**
      * Internal lookup with lazy expiration eviction.
      */
-    private RedisValue getInternal(String key) {
+    private RedisValue getInternal(ByteSequence key) {
         if (key == null) return null;
         RedisValue value = store.get(key);
         if (value == null) return null;
@@ -171,7 +206,7 @@ public class StorageEngine {
         return value;
     }
 
-    private RedisValue getAndCheckType(String key, RedisDataType expectedType) {
+    private RedisValue getAndCheckType(ByteSequence key, RedisDataType expectedType) {
         RedisValue val = getInternal(key);
         if (val != null && val.getType() != expectedType) {
             throw new WrongTypeException();
@@ -183,15 +218,15 @@ public class StorageEngine {
     // Phase 1 Operations (Respecting Expiration)
     // ==========================================
 
-    public void set(String key, String value) {
+    public void set(ByteSequence key, ByteSequence value) {
         set(key, value, null);
     }
 
-    public void set(String key, String value, Long expireAt) {
+    public void set(ByteSequence key, ByteSequence value, Long expireAt) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
-            RedisValue val = RedisValue.ofString(value);
+            RedisValue val = RedisValue.ofByteSequence(value);
             if (expireAt != null) {
                 if (expireAt <= now()) {
                     if (store.remove(key) != null) {
@@ -206,7 +241,17 @@ public class StorageEngine {
         }
     }
 
-    public void put(String key, RedisValue value) {
+    public void set(String key, String value) {
+        set(key, value, null);
+    }
+
+    public void set(String key, String value, Long expireAt) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(value, "value cannot be null");
+        set(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(value), expireAt);
+    }
+
+    public void put(ByteSequence key, RedisValue value) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
@@ -215,7 +260,12 @@ public class StorageEngine {
         }
     }
 
-    public RedisValue get(String key) {
+    public void put(String key, RedisValue value) {
+        Objects.requireNonNull(key, "key cannot be null");
+        put(ByteSequence.ofUtf8(key), value);
+    }
+
+    public RedisValue get(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getInternal(key);
             if (val != null) {
@@ -227,11 +277,16 @@ public class StorageEngine {
         }
     }
 
-    public int del(List<String> keys) {
+    public RedisValue get(String key) {
+        if (key == null) return null;
+        return get(ByteSequence.ofUtf8(key));
+    }
+
+    public int delBytes(List<ByteSequence> keys) {
         if (keys == null || keys.isEmpty()) return 0;
-        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocks(keys)) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocksBytes(keys)) {
             int count = 0;
-            for (String key : keys) {
+            for (ByteSequence key : keys) {
                 RedisValue existing = getInternal(key);
                 if (existing != null && store.remove(key) != null) {
                     bumpKeyVersion(key);
@@ -242,17 +297,35 @@ public class StorageEngine {
         }
     }
 
-    public int exists(List<String> keys) {
+    public int del(List<String> keys) {
         if (keys == null || keys.isEmpty()) return 0;
-        try (StripedLockManager.LockHandle ignored = stripedLocks.readLocks(keys)) {
+        List<ByteSequence> byteKeys = new ArrayList<>(keys.size());
+        for (String k : keys) {
+            byteKeys.add(ByteSequence.ofUtf8(k));
+        }
+        return delBytes(byteKeys);
+    }
+
+    public int existsBytes(List<ByteSequence> keys) {
+        if (keys == null || keys.isEmpty()) return 0;
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLocksBytes(keys)) {
             int count = 0;
-            for (String key : keys) {
+            for (ByteSequence key : keys) {
                 if (getInternal(key) != null) {
                     count++;
                 }
             }
             return count;
         }
+    }
+
+    public int exists(List<String> keys) {
+        if (keys == null || keys.isEmpty()) return 0;
+        List<ByteSequence> byteKeys = new ArrayList<>(keys.size());
+        for (String k : keys) {
+            byteKeys.add(ByteSequence.ofUtf8(k));
+        }
+        return existsBytes(byteKeys);
     }
 
     public Set<String> keys(String globPattern) {
@@ -265,8 +338,8 @@ public class StorageEngine {
             Set<String> matched = new TreeSet<>();
             long currentNow = now();
 
-            for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
-                String key = entry.getKey();
+            for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+                ByteSequence key = entry.getKey();
                 RedisValue val = entry.getValue();
                 if (val.isExpired(currentNow)) {
                     if (store.remove(key, val)) {
@@ -274,7 +347,36 @@ public class StorageEngine {
                     }
                     continue;
                 }
-                if (regex.matcher(key).matches()) {
+                String keyStr = key.toUtf8String();
+                if (regex.matcher(keyStr).matches()) {
+                    matched.add(keyStr);
+                }
+            }
+            return matched;
+        }
+    }
+
+    public Set<ByteSequence> keysBytes(String globPattern) {
+        if (globPattern == null || globPattern.isEmpty()) {
+            return Collections.emptySet();
+        }
+
+        try (StripedLockManager.LockHandle ignored = stripedLocks.allReadLocks()) {
+            Pattern regex = compileGlobToRegex(globPattern);
+            Set<ByteSequence> matched = new LinkedHashSet<>();
+            long currentNow = now();
+
+            for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+                ByteSequence key = entry.getKey();
+                RedisValue val = entry.getValue();
+                if (val.isExpired(currentNow)) {
+                    if (store.remove(key, val)) {
+                        bumpKeyVersion(key);
+                    }
+                    continue;
+                }
+                String keyStr = key.toUtf8String();
+                if (regex.matcher(keyStr).matches()) {
                     matched.add(key);
                 }
             }
@@ -293,7 +395,7 @@ public class StorageEngine {
 
     public void flushDb() {
         try (StripedLockManager.LockHandle ignored = stripedLocks.allWriteLocks()) {
-            for (String key : store.keySet()) {
+            for (ByteSequence key : store.keySet()) {
                 bumpKeyVersion(key);
             }
             globalFlushEpoch.incrementAndGet();
@@ -304,7 +406,7 @@ public class StorageEngine {
     public int cleanExpiredKeys() {
         int removed = 0;
         long currentNow = now();
-        for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
+        for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
             if (entry.getValue().isExpired(currentNow)) {
                 if (store.remove(entry.getKey(), entry.getValue())) {
                     bumpKeyVersion(entry.getKey());
@@ -316,6 +418,14 @@ public class StorageEngine {
     }
 
     public Map<String, RedisValue> getRawStore() {
+        Map<String, RedisValue> map = new HashMap<>();
+        for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+            map.put(entry.getKey().toUtf8String(), entry.getValue());
+        }
+        return Collections.unmodifiableMap(map);
+    }
+
+    public Map<ByteSequence, RedisValue> getRawByteStore() {
         return Collections.unmodifiableMap(store);
     }
 
@@ -323,22 +433,31 @@ public class StorageEngine {
     // Phase 2: Advanced Strings
     // ==========================================
 
-    public void mset(Map<String, String> keyValues) {
+    public void msetBytes(Map<ByteSequence, ByteSequence> keyValues) {
         Objects.requireNonNull(keyValues, "keyValues cannot be null");
-        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocks(keyValues.keySet())) {
-            for (Map.Entry<String, String> entry : keyValues.entrySet()) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocksBytes(keyValues.keySet())) {
+            for (Map.Entry<ByteSequence, ByteSequence> entry : keyValues.entrySet()) {
                 // Fresh value clears any previous TTL
-                store.put(entry.getKey(), RedisValue.ofString(entry.getValue()));
+                store.put(entry.getKey(), RedisValue.ofByteSequence(entry.getValue()));
                 bumpKeyVersion(entry.getKey());
             }
         }
     }
 
-    public List<RedisValue> mget(List<String> keys) {
+    public void mset(Map<String, String> keyValues) {
+        Objects.requireNonNull(keyValues, "keyValues cannot be null");
+        Map<ByteSequence, ByteSequence> byteMap = new LinkedHashMap<>(keyValues.size());
+        for (Map.Entry<String, String> entry : keyValues.entrySet()) {
+            byteMap.put(ByteSequence.ofUtf8(entry.getKey()), ByteSequence.ofUtf8(entry.getValue()));
+        }
+        msetBytes(byteMap);
+    }
+
+    public List<RedisValue> mgetBytes(List<ByteSequence> keys) {
         Objects.requireNonNull(keys, "keys cannot be null");
-        try (StripedLockManager.LockHandle ignored = stripedLocks.readLocks(keys)) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLocksBytes(keys)) {
             List<RedisValue> results = new ArrayList<>(keys.size());
-            for (String key : keys) {
+            for (ByteSequence key : keys) {
                 RedisValue val = getInternal(key);
                 if (val != null) {
                     serverMetrics.recordHit();
@@ -352,23 +471,48 @@ public class StorageEngine {
         }
     }
 
-    public long incr(String key) {
+    public List<RedisValue> mget(List<String> keys) {
+        Objects.requireNonNull(keys, "keys cannot be null");
+        List<ByteSequence> byteKeys = new ArrayList<>(keys.size());
+        for (String k : keys) {
+            byteKeys.add(ByteSequence.ofUtf8(k));
+        }
+        return mgetBytes(byteKeys);
+    }
+
+    public long incr(ByteSequence key) {
         return adjustInteger(key, 1L, false);
     }
 
-    public long decr(String key) {
+    public long incr(String key) {
+        return incr(ByteSequence.ofUtf8(key));
+    }
+
+    public long decr(ByteSequence key) {
         return adjustInteger(key, 1L, true);
     }
 
-    public long incrBy(String key, long delta) {
+    public long decr(String key) {
+        return decr(ByteSequence.ofUtf8(key));
+    }
+
+    public long incrBy(ByteSequence key, long delta) {
         return adjustInteger(key, delta, false);
     }
 
-    public long decrBy(String key, long delta) {
+    public long incrBy(String key, long delta) {
+        return incrBy(ByteSequence.ofUtf8(key), delta);
+    }
+
+    public long decrBy(ByteSequence key, long delta) {
         return adjustInteger(key, delta, true);
     }
 
-    private long adjustInteger(String key, long delta, boolean subtract) {
+    public long decrBy(String key, long delta) {
+        return decrBy(ByteSequence.ofUtf8(key), delta);
+    }
+
+    private long adjustInteger(ByteSequence key, long delta, boolean subtract) {
         Objects.requireNonNull(key, "key cannot be null");
         long currentNow = now();
 
@@ -384,12 +528,12 @@ public class StorageEngine {
                     } catch (ArithmeticException e) {
                         throw new ArithmeticException("ERR increment or decrement would overflow");
                     }
-                    return RedisValue.ofString(String.valueOf(initVal));
+                    return RedisValue.ofByteSequence(ByteSequence.ofAscii(String.valueOf(initVal)));
                 }
                 if (existing.getType() != RedisDataType.STRING) {
                     throw new WrongTypeException();
                 }
-                String raw = existing.getAsString();
+                String raw = existing.getAsByteSequence().toUtf8String();
                 long current;
                 try {
                     current = Long.parseLong(raw);
@@ -404,16 +548,16 @@ public class StorageEngine {
                     throw new ArithmeticException("ERR increment or decrement would overflow");
                 }
 
-                existing.setData(String.valueOf(updated));
+                existing.setData(ByteSequence.ofAscii(String.valueOf(updated)));
                 return existing;
             });
 
             bumpKeyVersion(key);
-            return Long.parseLong(computed.getAsString());
+            return Long.parseLong(computed.getAsByteSequence().toUtf8String());
         }
     }
 
-    public int append(String key, String value) {
+    public int append(ByteSequence key, ByteSequence value) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
         long currentNow = now();
@@ -424,34 +568,44 @@ public class StorageEngine {
                     existing = null;
                 }
                 if (existing == null) {
-                    return RedisValue.ofString(value);
+                    return RedisValue.ofByteSequence(value);
                 }
                 if (existing.getType() != RedisDataType.STRING) {
                     throw new WrongTypeException();
                 }
-                String newStr = existing.getAsString() + value;
-                existing.setData(newStr);
+                ByteSequence newBytes = existing.getAsByteSequence().concat(value);
+                existing.setData(newBytes);
                 return existing;
             });
 
             bumpKeyVersion(key);
-            return computed.getAsString().getBytes(StandardCharsets.UTF_8).length;
+            return computed.getAsByteSequence().length();
+        }
+    }
+
+    public int append(String key, String value) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(value, "value cannot be null");
+        return append(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(value));
+    }
+
+    public int strlen(ByteSequence key) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
+            RedisValue val = getAndCheckType(key, RedisDataType.STRING);
+            if (val == null) return 0;
+            return val.getAsByteSequence().length();
         }
     }
 
     public int strlen(String key) {
-        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
-            RedisValue val = getAndCheckType(key, RedisDataType.STRING);
-            if (val == null) return 0;
-            return val.getAsString().getBytes(StandardCharsets.UTF_8).length;
-        }
+        return strlen(ByteSequence.ofUtf8(key));
     }
 
     // ==========================================
     // Phase 2: Lists
     // ==========================================
 
-    public int lpush(String key, List<String> elements) {
+    public int lpushBytes(ByteSequence key, List<ByteSequence> elements) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(elements, "elements cannot be null");
         long currentNow = now();
@@ -460,11 +614,46 @@ public class StorageEngine {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
                 if (existing != null && existing.isExpired(currentNow)) existing = null;
-                if (existing == null) existing = RedisValue.ofList();
+                if (existing == null) existing = RedisValue.ofByteList();
                 if (existing.getType() != RedisDataType.LIST) throw new WrongTypeException();
-                Deque<String> list = existing.getAsList();
-                for (String elem : elements) {
+                Deque<ByteSequence> list = existing.getAsByteList();
+                for (ByteSequence elem : elements) {
                     list.addFirst(elem);
+                }
+                newSize.set(list.size());
+                return existing;
+            });
+            if (!elements.isEmpty()) {
+                bumpKeyVersion(key);
+            }
+            return newSize.get();
+        }
+    }
+
+    public int lpush(String key, List<String> elements) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(elements, "elements cannot be null");
+        List<ByteSequence> byteElems = new ArrayList<>(elements.size());
+        for (String e : elements) {
+            byteElems.add(ByteSequence.ofUtf8(e));
+        }
+        return lpushBytes(ByteSequence.ofUtf8(key), byteElems);
+    }
+
+    public int rpushBytes(ByteSequence key, List<ByteSequence> elements) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(elements, "elements cannot be null");
+        long currentNow = now();
+        AtomicInteger newSize = new AtomicInteger(0);
+
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            store.compute(key, (k, existing) -> {
+                if (existing != null && existing.isExpired(currentNow)) existing = null;
+                if (existing == null) existing = RedisValue.ofByteList();
+                if (existing.getType() != RedisDataType.LIST) throw new WrongTypeException();
+                Deque<ByteSequence> list = existing.getAsByteList();
+                for (ByteSequence elem : elements) {
+                    list.addLast(elem);
                 }
                 newSize.set(list.size());
                 return existing;
@@ -479,39 +668,24 @@ public class StorageEngine {
     public int rpush(String key, List<String> elements) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(elements, "elements cannot be null");
-        long currentNow = now();
-        AtomicInteger newSize = new AtomicInteger(0);
-
-        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
-            store.compute(key, (k, existing) -> {
-                if (existing != null && existing.isExpired(currentNow)) existing = null;
-                if (existing == null) existing = RedisValue.ofList();
-                if (existing.getType() != RedisDataType.LIST) throw new WrongTypeException();
-                Deque<String> list = existing.getAsList();
-                for (String elem : elements) {
-                    list.addLast(elem);
-                }
-                newSize.set(list.size());
-                return existing;
-            });
-            if (!elements.isEmpty()) {
-                bumpKeyVersion(key);
-            }
-            return newSize.get();
+        List<ByteSequence> byteElems = new ArrayList<>(elements.size());
+        for (String e : elements) {
+            byteElems.add(ByteSequence.ofUtf8(e));
         }
+        return rpushBytes(ByteSequence.ofUtf8(key), byteElems);
     }
 
-    public String lpop(String key) {
+    public ByteSequence lpop(ByteSequence key) {
         Objects.requireNonNull(key, "key cannot be null");
         long currentNow = now();
-        AtomicReference<String> popped = new AtomicReference<>(null);
+        AtomicReference<ByteSequence> popped = new AtomicReference<>(null);
 
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
                 if (existing == null) return null;
                 if (existing.isExpired(currentNow)) return null;
                 if (existing.getType() != RedisDataType.LIST) throw new WrongTypeException();
-                Deque<String> list = existing.getAsList();
+                Deque<ByteSequence> list = existing.getAsByteList();
                 popped.set(list.pollFirst());
                 if (list.isEmpty()) {
                     return null; // Atomically deletes empty list from map
@@ -525,17 +699,22 @@ public class StorageEngine {
         }
     }
 
-    public String rpop(String key) {
+    public String lpop(String key) {
+        ByteSequence res = lpop(ByteSequence.ofUtf8(key));
+        return res != null ? res.toUtf8String() : null;
+    }
+
+    public ByteSequence rpop(ByteSequence key) {
         Objects.requireNonNull(key, "key cannot be null");
         long currentNow = now();
-        AtomicReference<String> popped = new AtomicReference<>(null);
+        AtomicReference<ByteSequence> popped = new AtomicReference<>(null);
 
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
                 if (existing == null) return null;
                 if (existing.isExpired(currentNow)) return null;
                 if (existing.getType() != RedisDataType.LIST) throw new WrongTypeException();
-                Deque<String> list = existing.getAsList();
+                Deque<ByteSequence> list = existing.getAsByteList();
                 popped.set(list.pollLast());
                 if (list.isEmpty()) {
                     return null; // Atomically deletes empty list from map
@@ -549,20 +728,29 @@ public class StorageEngine {
         }
     }
 
-    public int llen(String key) {
+    public String rpop(String key) {
+        ByteSequence res = rpop(ByteSequence.ofUtf8(key));
+        return res != null ? res.toUtf8String() : null;
+    }
+
+    public int llen(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.LIST);
             if (val == null) return 0;
-            return val.getAsList().size();
+            return val.getAsByteList().size();
         }
     }
 
-    public List<String> lrange(String key, int start, int stop) {
+    public int llen(String key) {
+        return llen(ByteSequence.ofUtf8(key));
+    }
+
+    public List<ByteSequence> lrangeBytes(ByteSequence key, int start, int stop) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.LIST);
             if (val == null) return Collections.emptyList();
 
-            List<String> list = new ArrayList<>(val.getAsList());
+            List<ByteSequence> list = new ArrayList<>(val.getAsByteList());
             int size = list.size();
             if (size == 0) return Collections.emptyList();
 
@@ -579,11 +767,21 @@ public class StorageEngine {
         }
     }
 
+    public List<String> lrange(String key, int start, int stop) {
+        List<ByteSequence> bytesList = lrangeBytes(ByteSequence.ofUtf8(key), start, stop);
+        if (bytesList.isEmpty()) return Collections.emptyList();
+        List<String> res = new ArrayList<>(bytesList.size());
+        for (ByteSequence b : bytesList) {
+            res.add(b.toUtf8String());
+        }
+        return Collections.unmodifiableList(res);
+    }
+
     // ==========================================
     // Phase 2: Sets
     // ==========================================
 
-    public int sadd(String key, List<String> members) {
+    public int saddBytes(ByteSequence key, List<ByteSequence> members) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(members, "members cannot be null");
         long currentNow = now();
@@ -592,11 +790,11 @@ public class StorageEngine {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
                 if (existing != null && existing.isExpired(currentNow)) existing = null;
-                if (existing == null) existing = RedisValue.ofSet();
+                if (existing == null) existing = RedisValue.ofByteSet();
                 if (existing.getType() != RedisDataType.SET) throw new WrongTypeException();
-                Set<String> set = existing.getAsSet();
+                Set<ByteSequence> set = existing.getAsByteSet();
                 int added = 0;
-                for (String member : members) {
+                for (ByteSequence member : members) {
                     if (set.add(member)) {
                         added++;
                     }
@@ -611,7 +809,17 @@ public class StorageEngine {
         }
     }
 
-    public int srem(String key, List<String> members) {
+    public int sadd(String key, List<String> members) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(members, "members cannot be null");
+        List<ByteSequence> byteMembers = new ArrayList<>(members.size());
+        for (String m : members) {
+            byteMembers.add(ByteSequence.ofUtf8(m));
+        }
+        return saddBytes(ByteSequence.ofUtf8(key), byteMembers);
+    }
+
+    public int sremBytes(ByteSequence key, List<ByteSequence> members) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(members, "members cannot be null");
         long currentNow = now();
@@ -622,9 +830,9 @@ public class StorageEngine {
                 if (existing == null) return null;
                 if (existing.isExpired(currentNow)) return null;
                 if (existing.getType() != RedisDataType.SET) throw new WrongTypeException();
-                Set<String> set = existing.getAsSet();
+                Set<ByteSequence> set = existing.getAsByteSet();
                 int removed = 0;
-                for (String member : members) {
+                for (ByteSequence member : members) {
                     if (set.remove(member)) {
                         removed++;
                     }
@@ -642,14 +850,24 @@ public class StorageEngine {
         }
     }
 
-    public boolean sismember(String key, String member) {
+    public int srem(String key, List<String> members) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(members, "members cannot be null");
+        List<ByteSequence> byteMembers = new ArrayList<>(members.size());
+        for (String m : members) {
+            byteMembers.add(ByteSequence.ofUtf8(m));
+        }
+        return sremBytes(ByteSequence.ofUtf8(key), byteMembers);
+    }
+
+    public boolean sismember(ByteSequence key, ByteSequence member) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.SET);
             if (val == null) {
                 serverMetrics.recordMiss();
                 return false;
             }
-            boolean contains = val.getAsSet().contains(member);
+            boolean contains = val.getAsByteSet().contains(member);
             if (contains) {
                 serverMetrics.recordHit();
             } else {
@@ -659,27 +877,45 @@ public class StorageEngine {
         }
     }
 
-    public Set<String> smembers(String key) {
+    public boolean sismember(String key, String member) {
+        return sismember(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(member));
+    }
+
+    public Set<ByteSequence> smembersBytes(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.SET);
             if (val == null) return Collections.emptySet();
-            return Collections.unmodifiableSet(new LinkedHashSet<>(val.getAsSet()));
+            return Collections.unmodifiableSet(new LinkedHashSet<>(val.getAsByteSet()));
+        }
+    }
+
+    public Set<String> smembers(String key) {
+        Set<ByteSequence> byteSet = smembersBytes(ByteSequence.ofUtf8(key));
+        if (byteSet.isEmpty()) return Collections.emptySet();
+        Set<String> res = new LinkedHashSet<>();
+        for (ByteSequence b : byteSet) {
+            res.add(b.toUtf8String());
+        }
+        return Collections.unmodifiableSet(res);
+    }
+
+    public int scard(ByteSequence key) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
+            RedisValue val = getAndCheckType(key, RedisDataType.SET);
+            if (val == null) return 0;
+            return val.getAsByteSet().size();
         }
     }
 
     public int scard(String key) {
-        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
-            RedisValue val = getAndCheckType(key, RedisDataType.SET);
-            if (val == null) return 0;
-            return val.getAsSet().size();
-        }
+        return scard(ByteSequence.ofUtf8(key));
     }
 
     // ==========================================
     // Phase 2: Hashes
     // ==========================================
 
-    public int hset(String key, Map<String, String> fieldValues) {
+    public int hsetBytes(ByteSequence key, Map<ByteSequence, ByteSequence> fieldValues) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(fieldValues, "fieldValues cannot be null");
         long currentNow = now();
@@ -689,12 +925,12 @@ public class StorageEngine {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
                 if (existing != null && existing.isExpired(currentNow)) existing = null;
-                if (existing == null) existing = RedisValue.ofHash();
+                if (existing == null) existing = RedisValue.ofByteHash();
                 if (existing.getType() != RedisDataType.HASH) throw new WrongTypeException();
-                Map<String, String> map = existing.getAsHash();
+                Map<ByteSequence, ByteSequence> map = existing.getAsByteHash();
                 int count = 0;
-                for (Map.Entry<String, String> entry : fieldValues.entrySet()) {
-                    String prev = map.put(entry.getKey(), entry.getValue());
+                for (Map.Entry<ByteSequence, ByteSequence> entry : fieldValues.entrySet()) {
+                    ByteSequence prev = map.put(entry.getKey(), entry.getValue());
                     if (prev == null) {
                         count++;
                     }
@@ -712,14 +948,24 @@ public class StorageEngine {
         }
     }
 
-    public String hget(String key, String field) {
+    public int hset(String key, Map<String, String> fieldValues) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(fieldValues, "fieldValues cannot be null");
+        Map<ByteSequence, ByteSequence> byteMap = new LinkedHashMap<>(fieldValues.size());
+        for (Map.Entry<String, String> entry : fieldValues.entrySet()) {
+            byteMap.put(ByteSequence.ofUtf8(entry.getKey()), ByteSequence.ofUtf8(entry.getValue()));
+        }
+        return hsetBytes(ByteSequence.ofUtf8(key), byteMap);
+    }
+
+    public ByteSequence hget(ByteSequence key, ByteSequence field) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.HASH);
             if (val == null) {
                 serverMetrics.recordMiss();
                 return null;
             }
-            String res = val.getAsHash().get(field);
+            ByteSequence res = val.getAsByteHash().get(field);
             if (res != null) {
                 serverMetrics.recordHit();
             } else {
@@ -729,15 +975,30 @@ public class StorageEngine {
         }
     }
 
-    public Map<String, String> hgetall(String key) {
+    public String hget(String key, String field) {
+        ByteSequence res = hget(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(field));
+        return res != null ? res.toUtf8String() : null;
+    }
+
+    public Map<ByteSequence, ByteSequence> hgetallBytes(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.HASH);
             if (val == null) return Collections.emptyMap();
-            return Collections.unmodifiableMap(new LinkedHashMap<>(val.getAsHash()));
+            return Collections.unmodifiableMap(new LinkedHashMap<>(val.getAsByteHash()));
         }
     }
 
-    public int hdel(String key, List<String> fields) {
+    public Map<String, String> hgetall(String key) {
+        Map<ByteSequence, ByteSequence> byteMap = hgetallBytes(ByteSequence.ofUtf8(key));
+        if (byteMap.isEmpty()) return Collections.emptyMap();
+        Map<String, String> res = new LinkedHashMap<>(byteMap.size());
+        for (Map.Entry<ByteSequence, ByteSequence> entry : byteMap.entrySet()) {
+            res.put(entry.getKey().toUtf8String(), entry.getValue().toUtf8String());
+        }
+        return Collections.unmodifiableMap(res);
+    }
+
+    public int hdelBytes(ByteSequence key, List<ByteSequence> fields) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(fields, "fields cannot be null");
         long currentNow = now();
@@ -748,9 +1009,9 @@ public class StorageEngine {
                 if (existing == null) return null;
                 if (existing.isExpired(currentNow)) return null;
                 if (existing.getType() != RedisDataType.HASH) throw new WrongTypeException();
-                Map<String, String> map = existing.getAsHash();
+                Map<ByteSequence, ByteSequence> map = existing.getAsByteHash();
                 int removed = 0;
-                for (String field : fields) {
+                for (ByteSequence field : fields) {
                     if (map.remove(field) != null) {
                         removed++;
                     }
@@ -768,48 +1029,55 @@ public class StorageEngine {
         }
     }
 
-    public boolean hexists(String key, String field) {
+    public int hdel(String key, List<String> fields) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(fields, "fields cannot be null");
+        List<ByteSequence> byteFields = new ArrayList<>(fields.size());
+        for (String f : fields) {
+            byteFields.add(ByteSequence.ofUtf8(f));
+        }
+        return hdelBytes(ByteSequence.ofUtf8(key), byteFields);
+    }
+
+    public boolean hexists(ByteSequence key, ByteSequence field) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.HASH);
             if (val == null) return false;
-            return val.getAsHash().containsKey(field);
+            return val.getAsByteHash().containsKey(field);
         }
+    }
+
+    public boolean hexists(String key, String field) {
+        return hexists(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(field));
     }
 
     // ==========================================
     // Phase 3: Centralized Expiration & TTL
     // ==========================================
 
-    /**
-     * Sets expiration in seconds on key.
-     * If seconds <= 0, immediately deletes the key.
-     * Returns 1 if timeout was set/deleted, 0 if key does not exist.
-     */
-    public int expire(String key, long seconds) {
+    public int expire(ByteSequence key, long seconds) {
         if (seconds <= 0) {
-            return del(Collections.singletonList(key));
+            return delBytes(Collections.singletonList(key));
         }
         return setExpirationMillis(key, seconds * 1000L);
     }
 
-    /**
-     * Sets expiration in milliseconds on key.
-     * If milliseconds <= 0, immediately deletes the key.
-     * Returns 1 if timeout was set/deleted, 0 if key does not exist.
-     */
-    public int pexpire(String key, long milliseconds) {
+    public int expire(String key, long seconds) {
+        return expire(ByteSequence.ofUtf8(key), seconds);
+    }
+
+    public int pexpire(ByteSequence key, long milliseconds) {
         if (milliseconds <= 0) {
-            return del(Collections.singletonList(key));
+            return delBytes(Collections.singletonList(key));
         }
         return setExpirationMillis(key, milliseconds);
     }
 
-    /**
-     * Sets expiration at an absolute unix timestamp in milliseconds.
-     * If epochMillis <= clock.millis(), immediately deletes the key.
-     * Returns 1 if timeout was set or key was deleted, 0 if key does not exist.
-     */
-    public int pexpireAt(String key, long epochMillis) {
+    public int pexpire(String key, long milliseconds) {
+        return pexpire(ByteSequence.ofUtf8(key), milliseconds);
+    }
+
+    public int pexpireAt(ByteSequence key, long epochMillis) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             RedisValue val = getInternal(key);
             if (val == null) {
@@ -827,7 +1095,11 @@ public class StorageEngine {
         }
     }
 
-    private int setExpirationMillis(String key, long durationMillis) {
+    public int pexpireAt(String key, long epochMillis) {
+        return pexpireAt(ByteSequence.ofUtf8(key), epochMillis);
+    }
+
+    private int setExpirationMillis(ByteSequence key, long durationMillis) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             RedisValue val = getInternal(key);
             if (val == null) {
@@ -840,13 +1112,7 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Returns remaining TTL in seconds.
-     * Positive integer if TTL exists.
-     * -1 if key exists without TTL (persistent).
-     * -2 if key does not exist (or expired).
-     */
-    public long ttl(String key) {
+    public long ttl(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getInternal(key);
             if (val == null) return -2L;
@@ -867,13 +1133,11 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Returns remaining TTL in milliseconds.
-     * Positive integer if TTL exists.
-     * -1 if key exists without TTL.
-     * -2 if key does not exist (or expired).
-     */
-    public long pttl(String key) {
+    public long ttl(String key) {
+        return ttl(ByteSequence.ofUtf8(key));
+    }
+
+    public long pttl(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getInternal(key);
             if (val == null) return -2L;
@@ -893,11 +1157,11 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Removes the existing timeout on key.
-     * Returns 1 if timeout removed, 0 if key has no timeout or does not exist.
-     */
-    public int persist(String key) {
+    public long pttl(String key) {
+        return pttl(ByteSequence.ofUtf8(key));
+    }
+
+    public int persist(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             RedisValue val = getInternal(key);
             if (val == null) return 0;
@@ -908,11 +1172,11 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Atomically sets the string value and assigns the expiration timeout in seconds.
-     * Rejects seconds <= 0.
-     */
-    public void setex(String key, long seconds, String value) {
+    public int persist(String key) {
+        return persist(ByteSequence.ofUtf8(key));
+    }
+
+    public void setex(ByteSequence key, long seconds, ByteSequence value) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
         if (seconds <= 0) {
@@ -921,41 +1185,46 @@ public class StorageEngine {
 
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             long expireAt = calculateExpireAt(now(), seconds * 1000L);
-            RedisValue val = RedisValue.ofString(value);
+            RedisValue val = RedisValue.ofByteSequence(value);
             val.setExpireAt(expireAt);
             store.put(key, val);
             bumpKeyVersion(key);
         }
     }
 
-    public boolean isExpired(String key) {
+    public void setex(String key, long seconds, String value) {
+        setex(ByteSequence.ofUtf8(key), seconds, ByteSequence.ofUtf8(value));
+    }
+
+    public boolean isExpired(ByteSequence key) {
         RedisValue val = store.get(key);
         if (val == null) return true;
         return val.isExpired(now());
+    }
+
+    public boolean isExpired(String key) {
+        return isExpired(ByteSequence.ofUtf8(key));
     }
 
     // ==========================================
     // Phase 8: Key Utilities & Keyspace Stats
     // ==========================================
 
-    /**
-     * Returns the type name ("string", "list", "set", "hash") or "none" if missing/expired.
-     */
-    public String typeOf(String key) {
+    public String typeOf(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getInternal(key);
             return val != null ? val.getType().getTypeName() : "none";
         }
     }
 
-    /**
-     * Atomically renames oldKey to newKey under canonical striped write locks,
-     * preserving data and absolute TTL expiration metadata.
-     */
-    public void rename(String oldKey, String newKey) {
+    public String typeOf(String key) {
+        return typeOf(ByteSequence.ofUtf8(key));
+    }
+
+    public void rename(ByteSequence oldKey, ByteSequence newKey) {
         Objects.requireNonNull(oldKey, "oldKey cannot be null");
         Objects.requireNonNull(newKey, "newKey cannot be null");
-        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocks(List.of(oldKey, newKey))) {
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLocksBytes(List.of(oldKey, newKey))) {
             RedisValue oldVal = getInternal(oldKey);
             if (oldVal == null) {
                 throw new NoSuchElementException("ERR no such key");
@@ -970,16 +1239,17 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Returns a uniformly sampled active (non-expired) key from the database, or null if empty.
-     */
-    public String randomKey() {
+    public void rename(String oldKey, String newKey) {
+        rename(ByteSequence.ofUtf8(oldKey), ByteSequence.ofUtf8(newKey));
+    }
+
+    public ByteSequence randomKeyBytes() {
         try (StripedLockManager.LockHandle ignored = stripedLocks.allReadLocks()) {
             long currentNow = now();
-            String selected = null;
+            ByteSequence selected = null;
             int seen = 0;
-            for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
-                String k = entry.getKey();
+            for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+                ByteSequence k = entry.getKey();
                 RedisValue val = entry.getValue();
                 if (val == null || val.isExpired(currentNow)) {
                     if (val != null && store.remove(k, val)) {
@@ -994,6 +1264,11 @@ public class StorageEngine {
             }
             return selected;
         }
+    }
+
+    public String randomKey() {
+        ByteSequence k = randomKeyBytes();
+        return k != null ? k.toUtf8String() : null;
     }
 
     public static class KeyspaceStats {
@@ -1018,8 +1293,8 @@ public class StorageEngine {
             long totalTtlMs = 0L;
             long estimatedBytes = 0L;
 
-            for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
-                String key = entry.getKey();
+            for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+                ByteSequence key = entry.getKey();
                 RedisValue val = entry.getValue();
                 if (val == null || val.isExpired(currentNow)) {
                     continue;
@@ -1031,30 +1306,28 @@ public class StorageEngine {
                     totalTtlMs += Math.max(0L, expireAt - currentNow);
                 }
 
-                // Estimate entry overhead: Map.Entry + RedisValue wrapper + Key UTF-8 bytes
-                estimatedBytes += 64L + key.getBytes(StandardCharsets.UTF_8).length;
+                // Estimate entry overhead: Map.Entry + RedisValue wrapper + Key bytes
+                estimatedBytes += 64L + key.length();
                 switch (val.getType()) {
                     case STRING:
-                        estimatedBytes += 40L + val.getAsString().getBytes(StandardCharsets.UTF_8).length;
+                        estimatedBytes += 40L + val.getAsByteSequence().length();
                         break;
                     case LIST:
                         estimatedBytes += 48L;
-                        for (String item : val.getAsList()) {
-                            estimatedBytes += 32L + item.getBytes(StandardCharsets.UTF_8).length;
+                        for (ByteSequence item : val.getAsByteList()) {
+                            estimatedBytes += 32L + item.length();
                         }
                         break;
                     case SET:
                         estimatedBytes += 48L;
-                        for (String member : val.getAsSet()) {
-                            estimatedBytes += 32L + member.getBytes(StandardCharsets.UTF_8).length;
+                        for (ByteSequence member : val.getAsByteSet()) {
+                            estimatedBytes += 32L + member.length();
                         }
                         break;
                     case HASH:
                         estimatedBytes += 48L;
-                        for (Map.Entry<String, String> field : val.getAsHash().entrySet()) {
-                            estimatedBytes += 48L
-                                    + field.getKey().getBytes(StandardCharsets.UTF_8).length
-                                    + field.getValue().getBytes(StandardCharsets.UTF_8).length;
+                        for (Map.Entry<ByteSequence, ByteSequence> field : val.getAsByteHash().entrySet()) {
+                            estimatedBytes += 48L + field.getKey().length() + field.getValue().length();
                         }
                         break;
                 }
@@ -1075,20 +1348,15 @@ public class StorageEngine {
         }
     }
 
-    /**
-     * Active sampling algorithm used by ExpirationManager:
-     * Samples up to sampleSize keys that have active TTL metadata,
-     * tests them against current epoch time, and purges expired entries.
-     */
     public SampleResult sampleAndEvict(int sampleSize) {
         if (store.isEmpty()) {
             return new SampleResult(0, 0);
         }
 
-        List<Map.Entry<String, RedisValue>> expiringEntries = new ArrayList<>();
+        List<Map.Entry<ByteSequence, RedisValue>> expiringEntries = new ArrayList<>();
         long currentNow = now();
 
-        for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
+        for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
             if (entry.getValue().getExpireAt() != null) {
                 expiringEntries.add(entry);
             }
@@ -1098,19 +1366,17 @@ public class StorageEngine {
             return new SampleResult(0, 0);
         }
 
-        // Shuffle / sample up to sampleSize
         Collections.shuffle(expiringEntries, ThreadLocalRandom.current());
         int countToSample = Math.min(sampleSize, expiringEntries.size());
         int purged = 0;
 
         for (int i = 0; i < countToSample; i++) {
-            Map.Entry<String, RedisValue> entry = expiringEntries.get(i);
-            String key = entry.getKey();
+            Map.Entry<ByteSequence, RedisValue> entry = expiringEntries.get(i);
+            ByteSequence key = entry.getKey();
             RedisValue candidate = entry.getValue();
 
             try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
                 RedisValue current = store.get(key);
-                // Ensure key still points to the candidate instance and is still expired
                 if (current == candidate && current.isExpired(currentNow)) {
                     if (store.remove(key, candidate)) {
                         bumpKeyVersion(key);
@@ -1123,25 +1389,32 @@ public class StorageEngine {
         return new SampleResult(countToSample, purged);
     }
 
-    /**
-     * Snapshot entry representing an active, non-expired key and value for AOF compaction.
-     */
     public static class SnapshotEntry {
+        public final ByteSequence keyBytes;
         public final String key;
         public final RedisValue value;
         public final Long expireAt;
 
-        public SnapshotEntry(String key, RedisValue value, Long expireAt) {
-            this.key = key;
+        public SnapshotEntry(ByteSequence key, RedisValue value, Long expireAt) {
+            this.keyBytes = key;
+            this.key = key != null ? key.toUtf8String() : null;
             this.value = value;
             this.expireAt = expireAt;
         }
+
+        public SnapshotEntry(String key, RedisValue value, Long expireAt) {
+            this(key != null ? ByteSequence.ofUtf8(key) : null, value, expireAt);
+        }
+
+        public ByteSequence getKeyBytes() {
+            return keyBytes;
+        }
+
+        public String getKey() {
+            return key;
+        }
     }
 
-    /**
-     * Returns a snapshot of all active, non-expired entries in the store for AOF compaction.
-     * Takes striped read locks across all stripes, and executes the onLocked hook while locked.
-     */
     public List<SnapshotEntry> createSnapshot() {
         return createSnapshot(null);
     }
@@ -1153,8 +1426,8 @@ public class StorageEngine {
             if (onLocked != null) {
                 onLocked.run();
             }
-            for (Map.Entry<String, RedisValue> entry : store.entrySet()) {
-                String key = entry.getKey();
+            for (Map.Entry<ByteSequence, RedisValue> entry : store.entrySet()) {
+                ByteSequence key = entry.getKey();
                 RedisValue val = entry.getValue();
                 if (val != null && !val.isExpired(currentNow)) {
                     list.add(new SnapshotEntry(key, val.deepCopy(), val.getExpireAt()));
@@ -1163,10 +1436,6 @@ public class StorageEngine {
         }
         return list;
     }
-
-    // ==========================================
-    // Glob Pattern Utility
-    // ==========================================
 
     public static Pattern compileGlobToRegex(String glob) {
         if (glob.equals("*")) {

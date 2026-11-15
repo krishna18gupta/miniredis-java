@@ -2,6 +2,7 @@ package com.miniredis.commands.lists;
 
 import com.miniredis.commands.Command;
 import com.miniredis.commands.RedisResponse;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
@@ -31,6 +32,29 @@ public class LRangeCommand implements Command {
         try {
             List<String> range = storage.lrange(key, start, stop);
             return RedisResponse.stringList(range);
+        } catch (WrongTypeException e) {
+            return RedisResponse.error(e.getMessage());
+        }
+    }
+
+    @Override
+    public RedisResponse executeBytes(List<ByteSequence> args, StorageEngine storage) {
+        if (args.size() != 3) {
+            return RedisResponse.error("ERR wrong number of arguments for 'lrange' command");
+        }
+        ByteSequence key = args.get(0);
+        int start;
+        int stop;
+        try {
+            start = Integer.parseInt(args.get(1).toUtf8String());
+            stop = Integer.parseInt(args.get(2).toUtf8String());
+        } catch (NumberFormatException e) {
+            return RedisResponse.error("ERR value is not an integer or out of range");
+        }
+
+        try {
+            List<ByteSequence> range = storage.lrangeBytes(key, start, stop);
+            return RedisResponse.byteList(range);
         } catch (WrongTypeException e) {
             return RedisResponse.error(e.getMessage());
         }

@@ -95,6 +95,16 @@ def run_tests(host="127.0.0.1", port=6379):
         print(f"  [PASS] Error Semantics: caught expected WRONGTYPE exception ({e})")
     client.delete("py:strkey")
 
+    # 8. BINARY SAFETY: raw bytes with nulls, CRLF, and non-UTF-8 bytes
+    bin_client = redis.Redis(host=host, port=port, protocol=2, decode_responses=False, socket_timeout=3)
+    raw_payload = b"\x00\x01\x02\xff\xfe\r\n\x00Hello\x00World\x80"
+    raw_key = b"py:bin:\x00\xff"
+    bin_client.set(raw_key, raw_payload)
+    fetched = bin_client.get(raw_key)
+    assert fetched == raw_payload, f"Binary mismatch! Expected {raw_payload!r}, got {fetched!r}"
+    bin_client.delete(raw_key)
+    print("  [PASS] Binary Safety: raw bytes with nulls, CRLF and non-UTF8 bytes roundtrip via redis-py")
+
     print("-" * 70)
     print("   ALL PYTHON redis-py INTEROPERABILITY TESTS PASSED SUCCESSFULLY!   ")
     print("=" * 70)

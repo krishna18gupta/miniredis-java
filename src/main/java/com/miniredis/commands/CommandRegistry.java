@@ -8,6 +8,7 @@ import com.miniredis.commands.strings.*;
 import com.miniredis.commands.system.*;
 import com.miniredis.concurrency.StripedLockManager;
 import com.miniredis.server.TransactionContext;
+import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
@@ -17,6 +18,10 @@ import java.util.*;
  * Registry and dispatcher for all Redis commands.
  * Handles case-insensitive lookup, command-line tokenization with quoted strings,
  * striped locking, AOF persistence logging, and transactional MULTI/EXEC queuing.
+ *
+ * Binary Safety:
+ * Dispatches commands natively as immutable ByteSequence tokens without lossy String conversion.
+ * String-based callers adapt seamlessly through UTF-8 encoding at the public boundary.
  */
 public class CommandRegistry {
     private final Map<String, Command> commands = new HashMap<>();
@@ -123,22 +128,37 @@ public class CommandRegistry {
         if (tokens == null || tokens.isEmpty()) {
             return RedisResponse.error("ERR empty command");
         }
+        List<ByteSequence> byteTokens = new ArrayList<>(tokens.size());
+        for (String s : tokens) {
+            byteTokens.add(ByteSequence.ofUtf8(s));
+        }
+        return dispatchBytes(byteTokens, storage, tx);
+    }
 
-        String commandName = tokens.get(0).toUpperCase(Locale.ROOT);
-        List<String> args = tokens.subList(1, tokens.size());
+    public RedisResponse dispatchBytes(List<ByteSequence> tokens, StorageEngine storage) {
+        return dispatchBytes(tokens, storage, null);
+    }
+
+    public RedisResponse dispatchBytes(List<ByteSequence> tokens, StorageEngine storage, TransactionContext tx) {
+        if (tokens == null || tokens.isEmpty()) {
+            return RedisResponse.error("ERR empty command");
+        }
+
+        String commandName = tokens.get(0).toUtf8String().toUpperCase(Locale.ROOT);
+        List<ByteSequence> args = tokens.subList(1, tokens.size());
 
         // Transaction Control Commands
         switch (commandName) {
             case "WATCH":
-                return handleWatch(args, storage, tx);
+                return handleWatchBytes(args, storage, tx);
             case "UNWATCH":
-                return handleUnwatch(tokens, args, storage, tx);
+                return handleUnwatchBytes(tokens, args, storage, tx);
             case "MULTI":
-                return handleMulti(args, storage, tx);
+                return handleMultiBytes(args, storage, tx);
             case "DISCARD":
-                return handleDiscard(args, storage, tx);
+                return handleDiscardBytes(args, storage, tx);
             case "EXEC":
-                return handleExec(args, storage, tx);
+                return handleExecBytes(args, storage, tx);
             default:
                 break;
         }
@@ -149,22 +169,22 @@ public class CommandRegistry {
             if (cmd == null) {
                 tx.markExecAbort();
                 if (storage != null) storage.incrementFailedOperations();
-                return RedisResponse.error("ERR unknown command '" + tokens.get(0) + "'");
+                return RedisResponse.error("ERR unknown command '" + tokens.get(0).toUtf8String() + "'");
             }
-            RedisResponse syntaxError = validateQueueSyntax(commandName, args);
+            RedisResponse syntaxError = validateQueueSyntaxBytes(commandName, args);
             if (syntaxError != null) {
                 tx.markExecAbort();
                 if (storage != null) storage.incrementFailedOperations();
                 return syntaxError;
             }
-            tx.queueCommand(tokens);
+            tx.queueCommandBytes(tokens);
             return RedisResponse.simpleString("QUEUED");
         }
 
-        return executeSingleCommand(tokens, commandName, args, storage);
+        return executeSingleCommandBytes(tokens, commandName, args, storage);
     }
 
-    private RedisResponse handleWatch(List<String> args, StorageEngine storage, TransactionContext tx) {
+    private RedisResponse handleWatchBytes(List<ByteSequence> args, StorageEngine storage, TransactionContext tx) {
         if (tx == null || storage == null) {
             return RedisResponse.error("ERR WATCH requires a stateful client connection");
         }
@@ -176,21 +196,21 @@ public class CommandRegistry {
             storage.incrementFailedOperations();
             return RedisResponse.error("ERR wrong number of arguments for 'watch' command");
         }
-        for (String key : args) {
+        for (ByteSequence key : args) {
             tx.addWatch(key, storage.captureWatch(key));
         }
         storage.incrementCompletedOperations();
         return RedisResponse.ok();
     }
 
-    private RedisResponse handleUnwatch(List<String> tokens, List<String> args, StorageEngine storage, TransactionContext tx) {
+    private RedisResponse handleUnwatchBytes(List<ByteSequence> tokens, List<ByteSequence> args, StorageEngine storage, TransactionContext tx) {
         if (tx != null && tx.isInMulti()) {
             if (!args.isEmpty()) {
                 tx.markExecAbort();
                 if (storage != null) storage.incrementFailedOperations();
                 return RedisResponse.error("ERR wrong number of arguments for 'unwatch' command");
             }
-            tx.queueCommand(tokens);
+            tx.queueCommandBytes(tokens);
             return RedisResponse.simpleString("QUEUED");
         }
         if (!args.isEmpty()) {
@@ -206,7 +226,7 @@ public class CommandRegistry {
         return RedisResponse.ok();
     }
 
-    private RedisResponse handleMulti(List<String> args, StorageEngine storage, TransactionContext tx) {
+    private RedisResponse handleMultiBytes(List<ByteSequence> args, StorageEngine storage, TransactionContext tx) {
         if (tx == null || storage == null) {
             return RedisResponse.error("ERR MULTI requires a stateful client connection");
         }
@@ -226,7 +246,7 @@ public class CommandRegistry {
         return RedisResponse.ok();
     }
 
-    private RedisResponse handleDiscard(List<String> args, StorageEngine storage, TransactionContext tx) {
+    private RedisResponse handleDiscardBytes(List<ByteSequence> args, StorageEngine storage, TransactionContext tx) {
         if (tx == null || !tx.isInMulti()) {
             if (storage != null) storage.incrementFailedOperations();
             return RedisResponse.error("ERR DISCARD without MULTI");
@@ -240,7 +260,7 @@ public class CommandRegistry {
         return RedisResponse.ok();
     }
 
-    private RedisResponse handleExec(List<String> args, StorageEngine storage, TransactionContext tx) {
+    private RedisResponse handleExecBytes(List<ByteSequence> args, StorageEngine storage, TransactionContext tx) {
         if (tx == null || !tx.isInMulti()) {
             if (storage != null) storage.incrementFailedOperations();
             return RedisResponse.error("ERR EXEC without MULTI");
@@ -256,22 +276,22 @@ public class CommandRegistry {
             return RedisResponse.error("EXECABORT Transaction discarded because of previous errors.");
         }
 
-        List<List<String>> queue = new ArrayList<>(tx.getQueuedCommands());
-        List<StorageEngine.WatchSnapshot> watches = new ArrayList<>(tx.getWatchedKeys().values());
+        List<List<ByteSequence>> queue = new ArrayList<>(tx.getQueuedCommandsBytes());
+        List<StorageEngine.WatchSnapshot> watches = new ArrayList<>(tx.getWatchedByteKeys().values());
         tx.resetAfterExecOrDiscard();
 
-        Set<String> allKeys = new LinkedHashSet<>();
+        Set<ByteSequence> allKeys = new LinkedHashSet<>();
         for (StorageEngine.WatchSnapshot w : watches) {
-            allKeys.add(w.key);
+            allKeys.add(w.keyBytes != null ? w.keyBytes : ByteSequence.ofUtf8(w.key));
         }
 
         boolean needsGlobalWriteLock = false;
-        for (List<String> queued : queue) {
-            String cmdName = queued.get(0).toUpperCase(Locale.ROOT);
+        for (List<ByteSequence> queued : queue) {
+            String cmdName = queued.get(0).toUtf8String().toUpperCase(Locale.ROOT);
             if (requiresGlobalLock(cmdName)) {
                 needsGlobalWriteLock = true;
             } else {
-                allKeys.addAll(extractKeysForCommand(cmdName, queued));
+                allKeys.addAll(extractKeysForCommandBytes(cmdName, queued));
             }
         }
 
@@ -282,7 +302,7 @@ public class CommandRegistry {
             } else if (!allKeys.isEmpty()) {
                 // Always acquire exclusive write locks upfront in canonical ascending stripe order
                 // to guarantee isolation and prevent lock-upgrade deadlocks.
-                lock = storage.getStripedLockManager().writeLocks(allKeys);
+                lock = storage.getStripedLockManager().writeLocksBytes(allKeys);
             }
         }
 
@@ -297,11 +317,11 @@ public class CommandRegistry {
             }
 
             List<RedisResponse> responses = new ArrayList<>(queue.size());
-            List<List<String>> mutatingAofCommands = new ArrayList<>();
+            List<List<ByteSequence>> mutatingAofCommands = new ArrayList<>();
 
-            for (List<String> queued : queue) {
-                String cmdName = queued.get(0).toUpperCase(Locale.ROOT);
-                List<String> cmdArgs = queued.subList(1, queued.size());
+            for (List<ByteSequence> queued : queue) {
+                String cmdName = queued.get(0).toUtf8String().toUpperCase(Locale.ROOT);
+                List<ByteSequence> cmdArgs = queued.subList(1, queued.size());
 
                 if ("UNWATCH".equals(cmdName)) {
                     responses.add(RedisResponse.ok());
@@ -311,13 +331,13 @@ public class CommandRegistry {
 
                 Command cmd = commands.get(cmdName);
                 if (cmd == null) {
-                    responses.add(RedisResponse.error("ERR unknown command '" + queued.get(0) + "'"));
+                    responses.add(RedisResponse.error("ERR unknown command '" + queued.get(0).toUtf8String() + "'"));
                     if (storage != null) storage.incrementFailedOperations();
                     continue;
                 }
 
                 try {
-                    RedisResponse resp = cmd.execute(cmdArgs, storage);
+                    RedisResponse resp = cmd.executeBytes(cmdArgs, storage);
                     responses.add(resp);
                     if (resp.getType() == RedisResponse.ResponseType.ERROR) {
                         if (storage != null) storage.incrementFailedOperations();
@@ -325,7 +345,7 @@ public class CommandRegistry {
                         if (storage != null) {
                             storage.incrementCompletedOperations();
                             if (isMutatingCommand(cmdName)) {
-                                List<String> normalized = normalizeForAof(queued, storage);
+                                List<ByteSequence> normalized = normalizeForAofBytes(queued, storage);
                                 if (normalized != null) {
                                     mutatingAofCommands.add(normalized);
                                 }
@@ -342,7 +362,7 @@ public class CommandRegistry {
             }
 
             if (storage != null && storage.getAofManager() != null && !mutatingAofCommands.isEmpty()) {
-                storage.getAofManager().appendTransaction(mutatingAofCommands);
+                storage.getAofManager().appendTransactionBytes(mutatingAofCommands);
             }
 
             if (storage != null) {
@@ -359,14 +379,14 @@ public class CommandRegistry {
         }
     }
 
-    private RedisResponse executeSingleCommand(List<String> tokens, String commandName,
-                                               List<String> args, StorageEngine storage) {
+    private RedisResponse executeSingleCommandBytes(List<ByteSequence> tokens, String commandName,
+                                                    List<ByteSequence> args, StorageEngine storage) {
         Command cmd = commands.get(commandName);
         if (cmd == null) {
             if (storage != null) {
                 storage.incrementFailedOperations();
             }
-            return RedisResponse.error("ERR unknown command '" + tokens.get(0) + "'");
+            return RedisResponse.error("ERR unknown command '" + tokens.get(0).toUtf8String() + "'");
         }
 
         StripedLockManager.LockHandle lock = null;
@@ -374,9 +394,9 @@ public class CommandRegistry {
             if ("FLUSHDB".equals(commandName)) {
                 lock = storage.getStripedLockManager().allWriteLocks();
             } else {
-                Collection<String> keys = getMutatingKeys(commandName, tokens);
+                Collection<ByteSequence> keys = getMutatingKeysBytes(commandName, tokens);
                 if (!keys.isEmpty()) {
-                    lock = storage.getStripedLockManager().writeLocks(keys);
+                    lock = storage.getStripedLockManager().writeLocksBytes(keys);
                 }
             }
         }
@@ -384,13 +404,13 @@ public class CommandRegistry {
         try {
             RedisResponse resp;
             try {
-                resp = cmd.execute(args, storage);
+                resp = cmd.executeBytes(args, storage);
                 if (resp.getType() == RedisResponse.ResponseType.ERROR) {
                     if (storage != null) storage.incrementFailedOperations();
                 } else {
                     if (storage != null) {
                         storage.incrementCompletedOperations();
-                        logToAofIfMutating(tokens, storage);
+                        logToAofIfMutatingBytes(tokens, storage);
                     }
                 }
                 return resp;
@@ -411,7 +431,7 @@ public class CommandRegistry {
         }
     }
 
-    private RedisResponse validateQueueSyntax(String commandName, List<String> args) {
+    private RedisResponse validateQueueSyntaxBytes(String commandName, List<ByteSequence> args) {
         String lower = commandName.toLowerCase(Locale.ROOT);
         switch (commandName) {
             case "FLUSHDB":
@@ -435,7 +455,7 @@ public class CommandRegistry {
                     return RedisResponse.error("ERR syntax error");
                 }
                 if (args.size() == 1) {
-                    String mod = args.get(0).toUpperCase(Locale.ROOT);
+                    String mod = args.get(0).toUtf8String().toUpperCase(Locale.ROOT);
                     if (!"SAVE".equals(mod) && !"NOSAVE".equals(mod)) {
                         return RedisResponse.error("ERR syntax error");
                     }
@@ -496,7 +516,7 @@ public class CommandRegistry {
                     return RedisResponse.error("ERR wrong number of arguments for 'set' command");
                 }
                 for (int i = 2; i < args.size(); i++) {
-                    String opt = args.get(i).toUpperCase(Locale.ROOT);
+                    String opt = args.get(i).toUtf8String().toUpperCase(Locale.ROOT);
                     if (("EX".equals(opt) || "PX".equals(opt) || "EXAT".equals(opt) || "PXAT".equals(opt)) && i + 1 < args.size()) {
                         i++;
                     } else {
@@ -545,7 +565,7 @@ public class CommandRegistry {
         };
     }
 
-    private Collection<String> getMutatingKeys(String commandName, List<String> tokens) {
+    private Collection<ByteSequence> getMutatingKeysBytes(String commandName, List<ByteSequence> tokens) {
         if (tokens.size() < 2) return Collections.emptyList();
         if ("DEL".equals(commandName)) {
             return tokens.subList(1, tokens.size());
@@ -554,7 +574,7 @@ public class CommandRegistry {
             return tokens.size() >= 3 ? List.of(tokens.get(1), tokens.get(2)) : Collections.emptyList();
         }
         if ("MSET".equals(commandName)) {
-            List<String> keys = new ArrayList<>();
+            List<ByteSequence> keys = new ArrayList<>((tokens.size() - 1) / 2);
             for (int i = 1; i < tokens.size(); i += 2) {
                 keys.add(tokens.get(i));
             }
@@ -566,7 +586,7 @@ public class CommandRegistry {
         return List.of(tokens.get(1));
     }
 
-    private Collection<String> extractKeysForCommand(String commandName, List<String> tokens) {
+    private Collection<ByteSequence> extractKeysForCommandBytes(String commandName, List<ByteSequence> tokens) {
         if (tokens.size() < 2) return Collections.emptyList();
         switch (commandName) {
             case "DEL":
@@ -576,7 +596,7 @@ public class CommandRegistry {
             case "RENAME":
                 return tokens.size() >= 3 ? List.of(tokens.get(1), tokens.get(2)) : Collections.emptyList();
             case "MSET": {
-                List<String> keys = new ArrayList<>();
+                List<ByteSequence> keys = new ArrayList<>((tokens.size() - 1) / 2);
                 for (int i = 1; i < tokens.size(); i += 2) {
                     keys.add(tokens.get(i));
                 }
@@ -596,26 +616,27 @@ public class CommandRegistry {
         }
     }
 
-    private void logToAofIfMutating(List<String> tokens, StorageEngine storage) {
+    private void logToAofIfMutatingBytes(List<ByteSequence> tokens, StorageEngine storage) {
         if (storage == null || storage.getAofManager() == null || tokens.isEmpty()) {
             return;
         }
-        List<String> normalized = normalizeForAof(tokens, storage);
+        List<ByteSequence> normalized = normalizeForAofBytes(tokens, storage);
         if (normalized != null) {
-            storage.getAofManager().appendCommand(normalized);
+            storage.getAofManager().appendCommandBytes(normalized);
         }
     }
 
-    private List<String> normalizeForAof(List<String> tokens, StorageEngine storage) {
-        String name = tokens.get(0).toUpperCase(Locale.ROOT);
+    private List<ByteSequence> normalizeForAofBytes(List<ByteSequence> tokens, StorageEngine storage) {
+        String name = tokens.get(0).toUtf8String().toUpperCase(Locale.ROOT);
         long now = storage.getClock().millis();
 
         switch (name) {
             case "SETEX":
                 if (tokens.size() >= 4) {
                     try {
-                        long seconds = Long.parseLong(tokens.get(2));
-                        return List.of("SET", tokens.get(1), tokens.get(3), "PXAT", String.valueOf(now + seconds * 1000L));
+                        long seconds = Long.parseLong(tokens.get(2).toUtf8String());
+                        return List.of(ByteSequence.ofAscii("SET"), tokens.get(1), tokens.get(3),
+                                       ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(now + seconds * 1000L)));
                     } catch (NumberFormatException ignored) {
                         return null;
                     }
@@ -624,8 +645,9 @@ public class CommandRegistry {
             case "EXPIRE":
                 if (tokens.size() >= 3) {
                     try {
-                        long seconds = Long.parseLong(tokens.get(2));
-                        return List.of("PEXPIREAT", tokens.get(1), String.valueOf(now + seconds * 1000L));
+                        long seconds = Long.parseLong(tokens.get(2).toUtf8String());
+                        return List.of(ByteSequence.ofAscii("PEXPIREAT"), tokens.get(1),
+                                       ByteSequence.ofAscii(String.valueOf(now + seconds * 1000L)));
                     } catch (NumberFormatException ignored) {
                         return null;
                     }
@@ -634,8 +656,9 @@ public class CommandRegistry {
             case "PEXPIRE":
                 if (tokens.size() >= 3) {
                     try {
-                        long millis = Long.parseLong(tokens.get(2));
-                        return List.of("PEXPIREAT", tokens.get(1), String.valueOf(now + millis));
+                        long millis = Long.parseLong(tokens.get(2).toUtf8String());
+                        return List.of(ByteSequence.ofAscii("PEXPIREAT"), tokens.get(1),
+                                       ByteSequence.ofAscii(String.valueOf(now + millis)));
                     } catch (NumberFormatException ignored) {
                         return null;
                     }
@@ -643,14 +666,16 @@ public class CommandRegistry {
                 return null;
             case "SET":
                 if (tokens.size() >= 5) {
-                    String opt = tokens.get(3).toUpperCase(Locale.ROOT);
+                    String opt = tokens.get(3).toUtf8String().toUpperCase(Locale.ROOT);
                     try {
                         if ("EX".equals(opt)) {
-                            long sec = Long.parseLong(tokens.get(4));
-                            return List.of("SET", tokens.get(1), tokens.get(2), "PXAT", String.valueOf(now + sec * 1000L));
+                            long sec = Long.parseLong(tokens.get(4).toUtf8String());
+                            return List.of(ByteSequence.ofAscii("SET"), tokens.get(1), tokens.get(2),
+                                           ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(now + sec * 1000L)));
                         } else if ("PX".equals(opt)) {
-                            long ms = Long.parseLong(tokens.get(4));
-                            return List.of("SET", tokens.get(1), tokens.get(2), "PXAT", String.valueOf(now + ms));
+                            long ms = Long.parseLong(tokens.get(4).toUtf8String());
+                            return List.of(ByteSequence.ofAscii("SET"), tokens.get(1), tokens.get(2),
+                                           ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(now + ms)));
                         }
                     } catch (NumberFormatException ignored) {
                         return null;
