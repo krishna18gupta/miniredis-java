@@ -256,24 +256,6 @@ public class DifferentialTestHarness implements AutoCloseable {
                     }
                 } catch (NumberFormatException ignored) {}
             }
-        } else if (norm == DifferentialTestCase.NormalizationType.POSITIVE_INTEGER) {
-            // Both engines return an integer count > 0 (e.g. COMMAND COUNT discovery)
-            if (refTrimmed.startsWith(":") && miniTrimmed.startsWith(":")) {
-                try {
-                    long refVal = Long.parseLong(refTrimmed.substring(1));
-                    long miniVal = Long.parseLong(miniTrimmed.substring(1));
-                    if (refVal > 0 && miniVal > 0) {
-                        return DifferentialResult.match(testId, command, mode, miniTrimmed);
-                    }
-                } catch (NumberFormatException ignored) {}
-            }
-        } else if (norm == DifferentialTestCase.NormalizationType.TEXT_EQUIVALENT) {
-            // String content matches across simple string (+) and bulk string ($) framing
-            String refPayload = extractPayload(refTrimmed);
-            String miniPayload = extractPayload(miniTrimmed);
-            if (refPayload.equals(miniPayload)) {
-                return DifferentialResult.match(testId, command, mode, miniTrimmed);
-            }
         } else if (norm == DifferentialTestCase.NormalizationType.SET_UNORDERED) {
             // Parse RESP array elements and compare as Set
             Set<String> refElements = parseRespArrayElements(refTrimmed);
@@ -285,20 +267,6 @@ public class DifferentialTestHarness implements AutoCloseable {
 
         return DifferentialResult.mismatch(testId, command, mode, refTrimmed, miniTrimmed,
                 String.format("Output mismatch. Expected: '%s', Actual: '%s'", refTrimmed, miniTrimmed));
-    }
-
-    private String extractPayload(String resp) {
-        if (resp == null) return "";
-        if (resp.startsWith("+")) {
-            return resp.substring(1).trim();
-        }
-        if (resp.startsWith("$")) {
-            int firstNewline = resp.indexOf('\n');
-            if (firstNewline != -1) {
-                return resp.substring(firstNewline + 1).trim();
-            }
-        }
-        return resp.trim();
     }
 
     public static void printSummary(List<DifferentialResult> results, String redisVersion) {

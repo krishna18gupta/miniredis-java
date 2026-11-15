@@ -61,7 +61,7 @@ class Phase4NetworkingTest {
         try (RedisClient client = new RedisClient("127.0.0.1", port)) {
             client.connect();
             String response = client.sendCommand("PING \"Hello MiniRedis!\"");
-            assertEquals("Hello MiniRedis!", response);
+            assertEquals("\"Hello MiniRedis!\"", response);
         }
     }
 

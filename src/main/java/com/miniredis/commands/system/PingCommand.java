@@ -22,7 +22,7 @@ public class PingCommand implements Command {
         if (args.isEmpty()) {
             return RedisResponse.simpleString("PONG");
         } else if (args.size() == 1) {
-            return RedisResponse.simpleString(args.get(0));
+            return RedisResponse.bulkString(args.get(0));
         } else {
             return RedisResponse.error("ERR wrong number of arguments for 'ping' command");
         }

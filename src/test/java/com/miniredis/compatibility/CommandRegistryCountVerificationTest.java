@@ -73,5 +73,10 @@ public class CommandRegistryCountVerificationTest {
         assertEquals(57, totalImplemented);
         assertEquals(57, fullyVerified + partiallyCompatible);
         assertEquals(16, restrictedInDemo);
+
+        // 4. COMMAND COUNT verification
+        com.miniredis.commands.RedisResponse countResp = registry.dispatch("COMMAND COUNT", storage);
+        assertEquals(com.miniredis.commands.RedisResponse.ResponseType.INTEGER, countResp.getType());
+        assertEquals(57L, countResp.getIntValue(), "COMMAND COUNT must report the server's registered catalogue size");
     }
 }

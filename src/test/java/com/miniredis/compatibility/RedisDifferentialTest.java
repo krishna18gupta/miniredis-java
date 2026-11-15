@@ -237,7 +237,7 @@ public class RedisDifferentialTest {
         DifferentialTestCase tc = new DifferentialTestCase("SYS_01", "SYSTEM", "Server Utility Commands")
                 .withSetup("FLUSHDB")
                 .addStep("PING", "+PONG\r\n")
-                .addStep("PING \"Hello Differential\"", "+Hello Differential\r\n", DifferentialTestCase.NormalizationType.TEXT_EQUIVALENT) // Accommodates simple vs bulk string wire differences
+                .addStep("PING \"Hello Differential\"", "$18\r\nHello Differential\r\n") // Exact Redis 7.2 RESP2 bulk string frame
                 .addStep("ECHO \"Echo Test\"", "$9\r\nEcho Test\r\n")
                 .addStep("SET s1 val", "+OK\r\n")
                 .addStep("LPUSH l1 elem", ":1\r\n")
@@ -254,14 +254,13 @@ public class RedisDifferentialTest {
     }
 
     @Test
-    @DisplayName("SYSTEM: SELECT, CLIENT, COMMAND Protocol Discovery")
+    @DisplayName("SYSTEM: SELECT, CLIENT Protocol Management")
     public void testProtocolDiscoveryCommands() throws IOException {
         DifferentialTestCase tc = new DifferentialTestCase("SYS_02", "SYSTEM", "Client Management and Protocol Discovery")
                 .withSetup("FLUSHDB")
                 .addStep("SELECT 0", "+OK\r\n")
                 .addStep("CLIENT SETNAME test_diff_worker", "+OK\r\n")
-                .addStep("CLIENT GETNAME", "$16\r\ntest_diff_worker\r\n")
-                .addStep("COMMAND COUNT", ":57\r\n", DifferentialTestCase.NormalizationType.POSITIVE_INTEGER); // Discovery arity check
+                .addStep("CLIENT GETNAME", "$16\r\ntest_diff_worker\r\n");
 
         runAndAssert(tc);
     }

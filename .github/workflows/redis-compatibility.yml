@@ -13,7 +13,7 @@ jobs:
 
     services:
       redis:
-        image: redis:7.2-alpine
+        image: redis:7.2.17-alpine
         ports:
           - 6380:6379
         options: >-
@@ -51,6 +51,12 @@ jobs:
           echo "Reference Redis Server Details:"
           redis-cli -p 6380 info server | grep -E "redis_version|redis_mode|os|tcp_port"
           echo "=============================================="
+          REF_VERSION=$(redis-cli -p 6380 info server | grep "redis_version:" | tr -d '\r' | cut -d: -f2)
+          if [[ "$REF_VERSION" != 7.2.* ]]; then
+            echo "FATAL: Reference Redis version mismatch! Expected 7.2.x, got: $REF_VERSION"
+            exit 1
+          fi
+          echo "Confirmed: Reference Redis is running version $REF_VERSION"
 
       - name: Run Differential Tests (FORCED LIVE_REFERENCE_MODE)
         run: |

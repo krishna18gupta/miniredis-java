@@ -14,9 +14,7 @@ public class DifferentialTestCase {
         EXACT,              // Strict byte-for-byte and frame match
         SET_UNORDERED,      // Unordered collection (e.g. SMEMBERS)
         TTL_TOLERANCE,      // Dynamic countdown with acceptable second delta
-        INFO_METRIC_SUBSET, // Text key:value pairs where subset must match
-        POSITIVE_INTEGER,   // Both return positive integer (e.g. COMMAND COUNT discovery)
-        TEXT_EQUIVALENT     // String content matches across simple/bulk wire variants (e.g. PING [msg])
+        INFO_METRIC_SUBSET  // Text key:value pairs where subset must match
     }
 
     public static class Step {
