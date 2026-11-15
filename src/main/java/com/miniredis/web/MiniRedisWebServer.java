@@ -193,6 +193,13 @@ public class MiniRedisWebServer {
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", corsOrigin);
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token, X-Session-ID");
+        // Defensive HTTP Security & Caching Headers
+        exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
+        exchange.getResponseHeaders().set("X-Frame-Options", "DENY");
+        exchange.getResponseHeaders().set("Referrer-Policy", "strict-origin-when-cross-origin");
+        if (exchange.getRequestURI() != null && exchange.getRequestURI().getPath() != null && exchange.getRequestURI().getPath().startsWith("/api/")) {
+            exchange.getResponseHeaders().set("Cache-Control", "no-store, no-cache, must-revalidate");
+        }
 
         if ("OPTIONS".equalsIgnoreCase(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
@@ -467,14 +474,12 @@ public class MiniRedisWebServer {
                             "{\"status\":\"error\",\"message\":\"Rate limit exceeded. Please wait a moment.\"}".getBytes(StandardCharsets.UTF_8));
                     return;
                 }
-                if (sessionId != null && !DemoSecurityContext.isValidSessionId(sessionId)) {
+                if (sessionId == null || !DemoSecurityContext.isValidSessionId(sessionId)) {
                     webServer.sendResponse(exchange, 400, "application/json",
                             "{\"status\":\"error\",\"message\":\"Missing or invalid X-Session-ID header (must be 128-bit secure UUID)\"}".getBytes(StandardCharsets.UTF_8));
                     return;
                 }
-                if (sessionId != null) {
-                    demoSecurity.touchSession(sessionId);
-                }
+                demoSecurity.touchSession(sessionId);
             }
 
             String method = exchange.getRequestMethod().toUpperCase();
@@ -515,7 +520,20 @@ public class MiniRedisWebServer {
         }
 
         private void handleInspectKey(HttpExchange exchange, String key, boolean isDemo, String sessionId) throws IOException {
-            String internalKey = (isDemo && sessionId != null) ? DemoSecurityContext.toInternalKey(sessionId, key) : key;
+            String cleanKey = key != null ? key.trim() : "";
+            if (cleanKey.isEmpty()) {
+                webServer.sendResponse(exchange, 400, "application/json",
+                        "{\"status\":\"error\",\"message\":\"Missing 'key' parameter\"}".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
+            if (isDemo) {
+                if (DemoSecurityContext.isInternalNamespaceKey(cleanKey)) {
+                    webServer.sendResponse(exchange, 400, "application/json",
+                            "{\"status\":\"error\",\"message\":\"Access to internal session namespace is prohibited\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+            }
+            String internalKey = (isDemo && sessionId != null) ? DemoSecurityContext.toInternalKey(sessionId, cleanKey) : cleanKey;
             RedisValue val = storage.get(internalKey);
 
             if (val == null) {
@@ -530,7 +548,7 @@ public class MiniRedisWebServer {
 
             StringBuilder sb = new StringBuilder("{");
             sb.append("\"status\":\"ok\",");
-            sb.append(String.format("\"key\":\"%s\",", JsonUtil.escape(key)));
+            sb.append(String.format("\"key\":\"%s\",", JsonUtil.escape(cleanKey)));
             sb.append(String.format("\"type\":\"%s\",", type));
             sb.append(String.format("\"ttl\":%d,", ttl));
             sb.append(String.format("\"ttlFormatted\":\"%s\",", ttlFormatted));
@@ -589,6 +607,11 @@ public class MiniRedisWebServer {
 
         private void handleListKeys(HttpExchange exchange, Map<String, String> params, boolean isDemo, String sessionId) throws IOException {
             String pattern = params.getOrDefault("pattern", "*");
+            if (isDemo && DemoSecurityContext.isInternalNamespaceKey(pattern)) {
+                webServer.sendResponse(exchange, 400, "application/json",
+                        "{\"status\":\"error\",\"message\":\"Access to internal session namespace is prohibited\"}".getBytes(StandardCharsets.UTF_8));
+                return;
+            }
             String typeFilter = params.getOrDefault("type", "all").toLowerCase();
             int limit = 50;
             int offset = 0;
@@ -604,6 +627,7 @@ public class MiniRedisWebServer {
                 // Collect demo:* keys + session keys
                 Set<String> pool = new HashSet<>(storage.keys("demo:*"));
                 pool.addAll(storage.keys(DemoSecurityContext.SESSION_KEY_PREFIX + sessionId + ":*"));
+                java.util.regex.Pattern regex = StorageEngine.compileGlobToRegex(pattern);
 
                 for (String internalK : pool) {
                     RedisValue v = storage.get(internalK);
@@ -612,7 +636,7 @@ public class MiniRedisWebServer {
                         continue;
                     }
                     String external = DemoSecurityContext.toExternalKey(sessionId, internalK);
-                    if (external != null) {
+                    if (external != null && regex.matcher(external).matches()) {
                         visibleKeys.add(external);
                     }
                 }
@@ -697,6 +721,11 @@ public class MiniRedisWebServer {
             String cleanKey = key.trim();
 
             if (isDemo) {
+                if (DemoSecurityContext.isInternalNamespaceKey(cleanKey)) {
+                    webServer.sendResponse(exchange, 400, "application/json",
+                            "{\"status\":\"error\",\"message\":\"Access to internal session namespace is prohibited\"}".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
                 // Immutable demo key check
                 if (DemoSecurityContext.isProtectedDemoKey(cleanKey)) {
                     webServer.sendResponse(exchange, 403, "application/json",
@@ -790,33 +819,37 @@ public class MiniRedisWebServer {
                     webServer.sendResponse(exchange, 403, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
                     return;
                 }
-                if (sessionId != null && !DemoSecurityContext.isValidSessionId(sessionId)) {
-                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR invalid or missing X-Session-ID header (must be 128-bit secure UUID)\"}";
+                if (sessionId == null || !DemoSecurityContext.isValidSessionId(sessionId)) {
+                    String errJson = "{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"(error) ERR missing or invalid X-Session-ID header (must be 128-bit secure UUID)\"}";
                     webServer.sendResponse(exchange, 400, "application/json", errJson.getBytes(StandardCharsets.UTF_8));
                     return;
                 }
-                if (sessionId == null) {
-                    sessionId = "00000000-0000-0000-0000-000000000000";
-                }
+                demoSecurity.touchSession(sessionId);
             }
 
             RedisResponse response;
-            if (isDemo) {
-                response = demoSecurity.executeDemoCommand(sessionId, cmdLine);
-            } else {
-                response = registry.dispatch(cmdLine, storage);
+            try {
+                if (isDemo) {
+                    response = demoSecurity.executeDemoCommand(sessionId, cmdLine);
+                } else {
+                    response = registry.dispatch(cmdLine, storage);
+                }
+
+                boolean isError = response.getType() == RedisResponse.ResponseType.ERROR;
+                int statusCode = isError ? (response.toCliString().contains("not permitted") || response.toCliString().contains("immutable") ? 403 : 200) : 200;
+
+                String output = JsonUtil.escape(response.toCliString());
+                String json = String.format("{\"status\":\"%s\",\"type\":\"%s\",\"output\":\"%s\"}",
+                        isError ? "error" : "ok",
+                        response.getType().name(),
+                        output);
+
+                webServer.sendResponse(exchange, statusCode, "application/json", json.getBytes(StandardCharsets.UTF_8));
+            } catch (Exception e) {
+                String errOutput = JsonUtil.escape("(error) ERR internal server error: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+                String json = String.format("{\"status\":\"error\",\"type\":\"ERROR\",\"output\":\"%s\"}", errOutput);
+                webServer.sendResponse(exchange, 500, "application/json", json.getBytes(StandardCharsets.UTF_8));
             }
-
-            boolean isError = response.getType() == RedisResponse.ResponseType.ERROR;
-            int statusCode = isError ? (response.toCliString().contains("not permitted") || response.toCliString().contains("immutable") ? 403 : 200) : 200;
-
-            String output = JsonUtil.escape(response.toCliString());
-            String json = String.format("{\"status\":\"%s\",\"type\":\"%s\",\"output\":\"%s\"}",
-                    isError ? "error" : "ok",
-                    response.getType().name(),
-                    output);
-
-            webServer.sendResponse(exchange, statusCode, "application/json", json.getBytes(StandardCharsets.UTF_8));
         }
     }
 

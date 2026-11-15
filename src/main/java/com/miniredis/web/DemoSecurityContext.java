@@ -55,13 +55,15 @@ public class DemoSecurityContext {
             "PING", "ECHO", "HELLO", "KEYS", "INFO",
             // Write Operations (Session-Isolated)
             "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "SADD", "SREM",
-            "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL"
+            "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL",
+            "INCR", "DECR", "INCRBY", "DECRBY", "APPEND"
     );
 
     // Mutating Command Names
     private static final Set<String> MUTATING_COMMANDS = Set.of(
             "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "SADD", "SREM",
-            "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL"
+            "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL",
+            "INCR", "DECR", "INCRBY", "DECRBY", "APPEND"
     );
 
     private final StorageEngine storage;
@@ -143,12 +145,25 @@ public class DemoSecurityContext {
     }
 
     /**
+     * Determines whether a key attempts to address the internal visitor session namespace.
+     */
+    public static boolean isInternalNamespaceKey(String key) {
+        if (key == null) return false;
+        String clean = key.trim();
+        return clean.equals("session") || clean.startsWith(SESSION_KEY_PREFIX);
+    }
+
+    /**
      * Maps an external key to the internal session-isolated namespace.
      */
     public static String toInternalKey(String sessionId, String key) {
         if (key == null) return "";
         String clean = key.trim();
-        if (sessionId == null || sessionId.trim().isEmpty() || isProtectedDemoKey(clean)) {
+        if (clean.isEmpty()) return "";
+        if (isProtectedDemoKey(clean)) {
+            return clean;
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
             return clean;
         }
         return SESSION_KEY_PREFIX + sessionId.trim() + ":" + clean;
@@ -156,12 +171,15 @@ public class DemoSecurityContext {
 
     /**
      * Converts an internal key back to the visitor-facing key.
-     * Returns null if the key belongs to another visitor's session.
+     * Returns null if the key belongs to another visitor's session or if session ID is missing/invalid.
      */
     public static String toExternalKey(String sessionId, String internalKey) {
-        if (internalKey == null) return null;
+        if (internalKey == null || internalKey.isEmpty()) return null;
         if (isProtectedDemoKey(internalKey)) {
             return internalKey;
+        }
+        if (sessionId == null || sessionId.trim().isEmpty()) {
+            return null;
         }
         String prefix = SESSION_KEY_PREFIX + sessionId.trim() + ":";
         if (internalKey.startsWith(prefix)) {
@@ -244,6 +262,9 @@ public class DemoSecurityContext {
         String primaryKey = args.get(0);
         List<String> targetKeysToCheck = new ArrayList<>();
         if ("MSET".equals(command)) {
+            if (args.isEmpty() || args.size() % 2 != 0) {
+                return RedisResponse.error("ERR wrong number of arguments for 'mset' command");
+            }
             for (int i = 0; i < args.size(); i += 2) {
                 targetKeysToCheck.add(args.get(i));
             }
@@ -257,20 +278,67 @@ public class DemoSecurityContext {
             if (targetKey.getBytes().length > MAX_KEY_BYTES) {
                 return RedisResponse.error(String.format("ERR key name exceeds maximum length of %d bytes", MAX_KEY_BYTES));
             }
+            if (isInternalNamespaceKey(targetKey)) {
+                return RedisResponse.error("ERR key name cannot contain internal namespace prefix 'session:'");
+            }
             if (isMutating && isProtectedDemoKey(targetKey)) {
                 return RedisResponse.error(String.format("ERR key '%s' is an immutable system demo key and cannot be modified or deleted", targetKey));
             }
         }
 
-        // Check collection element limits
+        // Check collection element limits and bounds against current collection size
         if ("LPUSH".equals(command) || "RPUSH".equals(command) || "SADD".equals(command)) {
-            if (args.size() - 1 > MAX_COLLECTION_ITEMS) {
+            int incomingCount = Math.max(0, args.size() - 1);
+            if (incomingCount > MAX_COLLECTION_ITEMS) {
                 return RedisResponse.error(String.format("ERR maximum %d items allowed per operation", MAX_COLLECTION_ITEMS));
+            }
+            String internalKey = toInternalKey(sessionId, primaryKey);
+            RedisValue existing = storage.get(internalKey);
+            if (existing != null) {
+                int currentCount = 0;
+                if ("SADD".equals(command) && existing.getType() == RedisDataType.SET) {
+                    currentCount = existing.getAsSet().size();
+                } else if (("LPUSH".equals(command) || "RPUSH".equals(command)) && existing.getType() == RedisDataType.LIST) {
+                    currentCount = existing.getAsList().size();
+                }
+                if (currentCount + incomingCount > MAX_COLLECTION_ITEMS) {
+                    return RedisResponse.error(String.format("ERR collection size limit reached (%d items maximum per collection)", MAX_COLLECTION_ITEMS));
+                }
+            }
+        } else if ("HSET".equals(command)) {
+            if (args.size() >= 3 && (args.size() - 1) % 2 == 0) {
+                int incomingFields = (args.size() - 1) / 2;
+                if (incomingFields > MAX_COLLECTION_ITEMS) {
+                    return RedisResponse.error(String.format("ERR maximum %d fields allowed per operation", MAX_COLLECTION_ITEMS));
+                }
+                String internalKey = toInternalKey(sessionId, primaryKey);
+                RedisValue existing = storage.get(internalKey);
+                if (existing != null && existing.getType() == RedisDataType.HASH) {
+                    int currentCount = existing.getAsHash().size();
+                    if (currentCount + incomingFields > MAX_COLLECTION_ITEMS) {
+                        return RedisResponse.error(String.format("ERR collection size limit reached (%d fields maximum per hash)", MAX_COLLECTION_ITEMS));
+                    }
+                }
+            }
+        } else if ("APPEND".equals(command)) {
+            if (args.size() >= 2) {
+                String internalKey = toInternalKey(sessionId, primaryKey);
+                RedisValue existing = storage.get(internalKey);
+                int currentLength = (existing != null && existing.getType() == RedisDataType.STRING) ? existing.getAsString().length() : 0;
+                if (currentLength + args.get(1).getBytes().length > MAX_VALUE_BYTES) {
+                    return RedisResponse.error(String.format("ERR value exceeds maximum allowed size of %d bytes", MAX_VALUE_BYTES));
+                }
             }
         }
 
         // Check value size limits
         for (int i = 1; i < args.size(); i++) {
+            if ("MSET".equals(command) && i % 2 != 0) {
+                // Odd index in args for MSET: args.get(0) is key, args.get(1) is value, args.get(2) is key, args.get(3) is value
+                // i=1 (value), i=2 (key), i=3 (value) -> check values only
+            } else if ("MSET".equals(command)) {
+                continue; // key, checked earlier
+            }
             String val = args.get(i);
             if (val.getBytes().length > MAX_VALUE_BYTES) {
                 return RedisResponse.error(String.format("ERR value exceeds maximum allowed size of %d bytes", MAX_VALUE_BYTES));
@@ -301,7 +369,7 @@ public class DemoSecurityContext {
         } else if ("MSET".equals(command)) {
             for (int i = 0; i < args.size(); i += 2) {
                 String k = args.get(i);
-                String v = (i + 1 < args.size()) ? args.get(i + 1) : "";
+                String v = args.get(i + 1);
                 if (isProtectedDemoKey(k)) {
                     return RedisResponse.error(String.format("ERR key '%s' is an immutable system demo key and cannot be modified", k));
                 }
@@ -321,6 +389,9 @@ public class DemoSecurityContext {
 
     private RedisResponse handleIsolatedKeysCommand(String sessionId, String pattern) {
         String cleanPattern = (pattern != null && !pattern.isEmpty()) ? pattern : "*";
+        if (isInternalNamespaceKey(cleanPattern)) {
+            return RedisResponse.error("ERR pattern cannot target internal namespace 'session:'");
+        }
         Pattern regex = StorageEngine.compileGlobToRegex(cleanPattern);
         List<RedisResponse> resultResponses = new ArrayList<>();
 

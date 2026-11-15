@@ -17,12 +17,16 @@ interface Props {
 
 const PRESET_COMMANDS = [
   'PING',
-  'SET demo:app "MiniRedis v1.0.0"',
-  'GET demo:app',
-  'LPUSH demo:tasks "UnitTests" "AofRewrite" "RespParser"',
-  'LRANGE demo:tasks 0 -1',
-  'HSET demo:server engine "Pure Java 17" tcpPort 6379 httpPort 8080',
+  'GET demo:welcome',
+  'LRANGE demo:pipeline 0 -1',
   'HGETALL demo:server',
+  'SET user:name "Alice"',
+  'GET user:name',
+  'INCR user:visits',
+  'LPUSH user:queue "task-1" "task-2"',
+  'LRANGE user:queue 0 -1',
+  'HSET user:config theme "dark" lang "en"',
+  'HGETALL user:config',
   'DBSIZE',
   'INFO',
 ];

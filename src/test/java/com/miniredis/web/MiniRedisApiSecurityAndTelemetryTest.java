@@ -95,6 +95,7 @@ class MiniRedisApiSecurityAndTelemetryTest {
         // 1. Pattern filter for user:*
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + API_TEST_PORT + "/api/keys?pattern=user:*"))
+                .header("Authorization", "Bearer " + ADMIN_TOKEN)
                 .GET()
                 .build();
 
@@ -108,6 +109,7 @@ class MiniRedisApiSecurityAndTelemetryTest {
         // 2. Type filter for list only
         HttpRequest reqType = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + API_TEST_PORT + "/api/keys?type=list"))
+                .header("Authorization", "Bearer " + ADMIN_TOKEN)
                 .GET()
                 .build();
 
@@ -125,6 +127,7 @@ class MiniRedisApiSecurityAndTelemetryTest {
 
         HttpRequest req = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + API_TEST_PORT + "/api/keys?key=config:theme"))
+                .header("Authorization", "Bearer " + ADMIN_TOKEN)
                 .GET()
                 .build();
 
@@ -144,6 +147,7 @@ class MiniRedisApiSecurityAndTelemetryTest {
 
         HttpRequest delReq = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + API_TEST_PORT + "/api/keys?key=toDelete"))
+                .header("Authorization", "Bearer " + ADMIN_TOKEN)
                 .DELETE()
                 .build();
 

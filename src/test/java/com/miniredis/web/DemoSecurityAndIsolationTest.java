@@ -428,4 +428,328 @@ class DemoSecurityAndIsolationTest {
         assertFalse(limiter.allowClient(ip, brandNewSessionId),
                 "New session ID must be rejected once the IP limit has been reached");
     }
+
+    @Test
+    @DisplayName("10. Missing and empty session IDs are strictly rejected across all demo API routes")
+    void testMissingAndEmptySessionIdRejected() throws Exception {
+        // 1. GET /api/keys with no header -> 400
+        HttpRequest reqNoSess = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys"))
+                .GET()
+                .build();
+        HttpResponse<String> resNoSess = client.send(reqNoSess, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resNoSess.statusCode());
+        assertTrue(resNoSess.body().contains("Missing or invalid X-Session-ID"));
+
+        // 2. GET /api/keys with empty header -> 400
+        HttpRequest reqEmptySess = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys"))
+                .header("X-Session-ID", "")
+                .GET()
+                .build();
+        HttpResponse<String> resEmptySess = client.send(reqEmptySess, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resEmptySess.statusCode());
+
+        // 3. GET /api/keys?key=mykey with no header -> 400
+        HttpRequest reqInspectNoSess = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=mykey"))
+                .GET()
+                .build();
+        HttpResponse<String> resInspectNoSess = client.send(reqInspectNoSess, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resInspectNoSess.statusCode());
+
+        // 4. DELETE /api/keys?key=mykey with no header -> 400
+        HttpRequest reqDeleteNoSess = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=mykey"))
+                .DELETE()
+                .build();
+        HttpResponse<String> resDeleteNoSess = client.send(reqDeleteNoSess, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resDeleteNoSess.statusCode());
+
+        // 5. POST /api/exec with no header -> 400
+        HttpRequest reqExecNoSess = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("SET foo bar"))
+                .build();
+        HttpResponse<String> resExecNoSess = client.send(reqExecNoSess, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resExecNoSess.statusCode());
+        assertTrue(resExecNoSess.body().contains("missing or invalid X-Session-ID"));
+    }
+
+    @Test
+    @DisplayName("11. Cross-visitor inspection and deletion: Session B or unauthenticated actor cannot touch Session A keys")
+    void testCrossVisitorInspectionAndDeletionBlocked() throws Exception {
+        String sessionA = UUID.randomUUID().toString();
+        String sessionB = UUID.randomUUID().toString();
+
+        // Session A sets secret = ConfidentialValue
+        HttpRequest reqSetA = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", sessionA)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("SET secret ConfidentialValue"))
+                .build();
+        assertEquals(200, client.send(reqSetA, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // Verify stored in raw engine under session namespace
+        String internalKeyA = DemoSecurityContext.toInternalKey(sessionA, "secret");
+        assertNotNull(storage.get(internalKeyA));
+
+        // 1. Session B attempts to inspect 'secret' -> returns 404
+        HttpRequest reqInspectB = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=secret"))
+                .header("X-Session-ID", sessionB)
+                .GET()
+                .build();
+        HttpResponse<String> resInspectB = client.send(reqInspectB, HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resInspectB.statusCode());
+
+        // 2. Session B attempts to delete 'secret' -> returns 404
+        HttpRequest reqDeleteB = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=secret"))
+                .header("X-Session-ID", sessionB)
+                .DELETE()
+                .build();
+        HttpResponse<String> resDeleteB = client.send(reqDeleteB, HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resDeleteB.statusCode());
+
+        // 3. Session B attempts to inspect Session A's internal namespaced key directly -> returns 400 prohibited
+        HttpRequest reqInspectInternal = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=" + internalKeyA))
+                .header("X-Session-ID", sessionB)
+                .GET()
+                .build();
+        HttpResponse<String> resInspectInternal = client.send(reqInspectInternal, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resInspectInternal.statusCode());
+        assertTrue(resInspectInternal.body().contains("prohibited"));
+
+        // 4. Session B attempts to delete Session A's internal namespaced key directly -> returns 400 prohibited
+        HttpRequest reqDeleteInternal = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=" + internalKeyA))
+                .header("X-Session-ID", sessionB)
+                .DELETE()
+                .build();
+        HttpResponse<String> resDeleteInternal = client.send(reqDeleteInternal, HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resDeleteInternal.statusCode());
+        assertTrue(resDeleteInternal.body().contains("prohibited"));
+
+        // 5. Attacker with NO session header attempts to delete Session A's key -> returns 400
+        HttpRequest reqDeleteAttacker = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/keys?key=" + internalKeyA))
+                .DELETE()
+                .build();
+        assertEquals(400, client.send(reqDeleteAttacker, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // Verify Session A's key is STILL intact and untouched
+        assertNotNull(storage.get(internalKeyA));
+        assertEquals("ConfidentialValue", storage.get(internalKeyA).getAsString());
+    }
+
+    @Test
+    @DisplayName("12. Internal session namespace prefix 'session:' is rejected in all command arguments and patterns")
+    void testInternalNamespacePrefixRejectedInCommands() throws Exception {
+        String session = UUID.randomUUID().toString();
+
+        // 1. SET session:injected
+        HttpRequest reqSet = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("SET session:injected hacked"))
+                .build();
+        HttpResponse<String> resSet = client.send(reqSet, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resSet.body().contains("ERR key name cannot contain internal namespace prefix 'session:'"));
+
+        // 2. GET session:injected
+        HttpRequest reqGet = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("GET session:injected"))
+                .build();
+        HttpResponse<String> resGet = client.send(reqGet, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resGet.body().contains("ERR key name cannot contain internal namespace prefix 'session:'"));
+
+        // 3. KEYS session:*
+        HttpRequest reqKeys = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("KEYS session:*"))
+                .build();
+        HttpResponse<String> resKeys = client.send(reqKeys, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resKeys.body().contains("ERR pattern cannot target internal namespace 'session:'"));
+    }
+
+    @Test
+    @DisplayName("13. MSET with odd argument count returns proper syntax error instead of padding empty value")
+    void testMsetOddArgumentCountReturnsSyntaxError() throws Exception {
+        String session = UUID.randomUUID().toString();
+
+        HttpRequest reqMsetOdd = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("MSET key1 val1 key2"))
+                .build();
+        HttpResponse<String> resMsetOdd = client.send(reqMsetOdd, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resMsetOdd.body().contains("ERR wrong number of arguments for 'mset' command"),
+                "Odd argument count must return error: " + resMsetOdd.body());
+
+        // Verify key2 was NOT created with an empty value
+        String internalKey2 = DemoSecurityContext.toInternalKey(session, "key2");
+        assertNull(storage.get(internalKey2), "key2 must not be created");
+    }
+
+    @Test
+    @DisplayName("14. Unbounded collection growth: Existing collection size + new items is bounded to 50")
+    void testUnboundedCollectionGrowthPrevented() throws Exception {
+        String session = UUID.randomUUID().toString();
+
+        // 1. Fill list up to 50 items
+        StringBuilder sb50 = new StringBuilder("RPUSH growth_list");
+        for (int i = 0; i < 50; i++) {
+            sb50.append(" item").append(i);
+        }
+        HttpRequest req50 = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString(sb50.toString()))
+                .build();
+        assertEquals(200, client.send(req50, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        // 2. Attempt to add 1 more item via repeated single-element RPUSH
+        HttpRequest reqExtra = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("RPUSH growth_list extra_item"))
+                .build();
+        HttpResponse<String> resExtra = client.send(reqExtra, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resExtra.body().contains("collection size limit reached"),
+                "Exceeding 50 items via single push must be rejected: " + resExtra.body());
+
+        // Verify list size is exactly 50
+        String internalList = DemoSecurityContext.toInternalKey(session, "growth_list");
+        assertEquals(50, storage.get(internalList).getAsList().size());
+    }
+
+    @Test
+    @DisplayName("15. Numeric and Append commands (INCR, DECR, INCRBY, DECRBY, APPEND) enabled with isolation")
+    void testNumericAndAppendCommandsInDemoMode() throws Exception {
+        String session = UUID.randomUUID().toString();
+
+        // 1. SET and INCR
+        HttpRequest reqSet = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("SET num 10"))
+                .build();
+        assertEquals(200, client.send(reqSet, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+        HttpRequest reqIncr = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("INCR num"))
+                .build();
+        HttpResponse<String> resIncr = client.send(reqIncr, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resIncr.body().contains("11"));
+
+        // 2. INCRBY
+        HttpRequest reqIncrBy = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("INCRBY num 5"))
+                .build();
+        HttpResponse<String> resIncrBy = client.send(reqIncrBy, HttpResponse.BodyHandlers.ofString());
+        assertTrue(resIncrBy.body().contains("16"));
+
+        // 3. DECR and DECRBY
+        HttpRequest reqDecr = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("DECR num"))
+                .build();
+        assertTrue(client.send(reqDecr, HttpResponse.BodyHandlers.ofString()).body().contains("15"));
+
+        HttpRequest reqDecrBy = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("DECRBY num 10"))
+                .build();
+        assertTrue(client.send(reqDecrBy, HttpResponse.BodyHandlers.ofString()).body().contains("5"));
+
+        // 4. APPEND
+        HttpRequest reqAppend = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("APPEND num _ext"))
+                .build();
+        assertTrue(client.send(reqAppend, HttpResponse.BodyHandlers.ofString()).body().contains("5")); // new length: "5_ext" = 5 chars
+
+        HttpRequest reqGet = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("GET num"))
+                .build();
+        assertTrue(client.send(reqGet, HttpResponse.BodyHandlers.ofString()).body().contains("5_ext"));
+
+        // 5. Immutable demo key protection with INCR and APPEND
+        HttpRequest reqIncrDemo = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("INCR demo:welcome"))
+                .build();
+        assertTrue(client.send(reqIncrDemo, HttpResponse.BodyHandlers.ofString()).body().contains("immutable system demo key"));
+
+        HttpRequest reqAppendDemo = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/exec"))
+                .header("X-Session-ID", session)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString("APPEND demo:welcome hacked"))
+                .build();
+        assertTrue(client.send(reqAppendDemo, HttpResponse.BodyHandlers.ofString()).body().contains("immutable system demo key"));
+    }
+
+    @Test
+    @DisplayName("16. toExternalKey and toInternalKey safe null and empty handling")
+    void testToExternalKeySafeNullHandling() {
+        // Safe handling of null and empty values without throwing NullPointerException
+        assertEquals("demo:welcome", DemoSecurityContext.toExternalKey(null, "demo:welcome"));
+        assertNull(DemoSecurityContext.toExternalKey(null, "session:uuid:key"));
+        assertNull(DemoSecurityContext.toExternalKey("", "session:uuid:key"));
+        assertNull(DemoSecurityContext.toExternalKey("some-uuid", null));
+        assertNull(DemoSecurityContext.toExternalKey("some-uuid", ""));
+
+        assertEquals("", DemoSecurityContext.toInternalKey(null, null));
+        assertEquals("", DemoSecurityContext.toInternalKey("uuid", null));
+        assertEquals("demo:welcome", DemoSecurityContext.toInternalKey(null, "demo:welcome"));
+        assertEquals("demo:welcome", DemoSecurityContext.toInternalKey("uuid", "demo:welcome"));
+    }
+
+    @Test
+    @DisplayName("17. Defensive HTTP Security and Caching Headers are present on responses")
+    void testSecurityHeadersAndCaching() throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + TEST_PORT + "/api/health"))
+                .GET()
+                .build();
+        HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, res.statusCode());
+
+        assertEquals("nosniff", res.headers().firstValue("X-Content-Type-Options").orElse(null));
+        assertEquals("DENY", res.headers().firstValue("X-Frame-Options").orElse(null));
+        assertEquals("strict-origin-when-cross-origin", res.headers().firstValue("Referrer-Policy").orElse(null));
+        assertEquals("no-store, no-cache, must-revalidate", res.headers().firstValue("Cache-Control").orElse(null));
+    }
 }

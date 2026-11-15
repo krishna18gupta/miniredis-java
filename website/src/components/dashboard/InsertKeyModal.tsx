@@ -26,12 +26,21 @@ export const InsertKeyModal: React.FC<Props> = ({ isOpen, onClose, onKeyInserted
       return;
     }
 
+    const cleanKey = key.trim();
+    if (cleanKey.startsWith('demo:') || cleanKey === 'demo') {
+      setError("Keys with 'demo:' prefix are reserved for immutable system demo data. Please choose another prefix (e.g. user:*, app:*).");
+      return;
+    }
+    if (cleanKey.startsWith('session:') || cleanKey === 'session') {
+      setError("Keys with 'session:' prefix are reserved for internal visitor namespaces.");
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
     try {
       let command = '';
-      const cleanKey = key.trim();
 
       if (type === 'string') {
         const ttlNum = parseInt(ttl.trim(), 10);

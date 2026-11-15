@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Plus, RefreshCw, Eye, Trash2, Clock, Database, AlertTriangle } from 'lucide-react';
+import { Search, Plus, RefreshCw, Eye, Trash2, Clock, Database, AlertTriangle, Lock } from 'lucide-react';
 import { KeyItem, KeyDetailResponse } from './types';
 import { fetchKeyDetail, deleteKey } from './api';
 import { KeyInspectorModal } from './KeyInspectorModal';
@@ -216,13 +216,22 @@ export const DatabaseExplorer: React.FC<Props> = ({
                       >
                         <Eye className="w-4 h-4" />
                       </button>
-                      <button
-                        onClick={() => setKeyToDelete(k.key)}
-                        className="p-1 rounded text-zinc-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
-                        title="Delete Key"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {k.key.startsWith('demo:') || k.key === 'demo' ? (
+                        <span
+                          className="p-1 rounded text-zinc-400 dark:text-zinc-500 cursor-not-allowed inline-flex items-center"
+                          title="Immutable System Demo Key"
+                        >
+                          <Lock className="w-4 h-4" />
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => setKeyToDelete(k.key)}
+                          className="p-1 rounded text-zinc-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                          title="Delete Key"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>
