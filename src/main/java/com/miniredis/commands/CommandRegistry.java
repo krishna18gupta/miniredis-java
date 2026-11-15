@@ -688,6 +688,7 @@ public class CommandRegistry {
         boolean inDoubleQuotes = false;
         boolean inSingleQuotes = false;
         boolean escaping = false;
+        boolean hasToken = false;
 
         for (int i = 0; i < line.length(); i++) {
             char c = line.charAt(i);
@@ -695,35 +696,41 @@ public class CommandRegistry {
             if (escaping) {
                 sb.append(c);
                 escaping = false;
+                hasToken = true;
                 continue;
             }
 
             if (c == '\\') {
                 escaping = true;
+                hasToken = true;
                 continue;
             }
 
             if (c == '"' && !inSingleQuotes) {
                 inDoubleQuotes = !inDoubleQuotes;
+                hasToken = true;
                 continue;
             }
 
             if (c == '\'' && !inDoubleQuotes) {
                 inSingleQuotes = !inSingleQuotes;
+                hasToken = true;
                 continue;
             }
 
             if (Character.isWhitespace(c) && !inDoubleQuotes && !inSingleQuotes) {
-                if (sb.length() > 0) {
+                if (hasToken || sb.length() > 0) {
                     tokens.add(sb.toString());
                     sb.setLength(0);
+                    hasToken = false;
                 }
             } else {
                 sb.append(c);
+                hasToken = true;
             }
         }
 
-        if (sb.length() > 0) {
+        if (hasToken || sb.length() > 0) {
             tokens.add(sb.toString());
         }
 
