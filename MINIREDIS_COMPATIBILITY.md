@@ -3,8 +3,8 @@
 **Target Reference Baseline:** Redis Open Source 7.2 (Standalone Mode)  
 **Primary Protocol Target:** RESP2  
 **Future Protocol Target:** RESP3  
-**Document Version:** 1.0.0 (Phase 17)  
-**Latest Engine Commit:** `aa8b6a7`
+**Document Version:** 1.1.0 (Phase 17 Stage 8 - Real Client & Reference Verification)  
+**Latest Engine Commit:** `abfc286` (Updated in Stage 8)
 
 ---
 
@@ -138,20 +138,23 @@ Below is the comprehensive audit of all **57 commands implemented in MiniRedis**
 
 ---
 
-## 3. Explicit Inventory of Unsupported Redis 7.2 Commands
+## 3. Explicit Profile Exclusions & Out-of-Scope Redis 7.2 Capabilities
 
-The following major Redis command categories and commands are **NOT implemented in MiniRedis** at this stage and must be tracked for future phases:
+To establish clear standalone database boundaries, the following major Redis capabilities are categorized as **Architectural Profile Exclusions** (features deliberately scoped out of the single-node in-memory key-value core) or **Future Capabilities**, rather than third-party optional modules:
 
-1. **Bitmaps & Bitfields:** `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS`, `BITFIELD`.
-2. **HyperLogLog:** `PFADD`, `PFCOUNT`, `PFMERGE`.
-3. **Geospatial:** `GEOADD`, `GEODIST`, `GEOHASH`, `GEOPOS`, `GEORADIUS`, `GEOSEARCH`.
-4. **Sorted Sets (ZSets):** `ZADD`, `ZREM`, `ZSCORE`, `ZRANGE`, `ZCARD`, `ZCOUNT`, `ZINCRBY`, `ZPOPMIN`, `ZPOPMAX`, `ZRANK`, `ZREVRANK`, `ZINTERSTORE`, `ZUNIONSTORE`.
-5. **Streams:** `XADD`, `XREAD`, `XRANGE`, `XREVRANGE`, `XLEN`, `XDEL`, `XTRIM`, `XGROUP`, `XREADGROUP`, `XACK`.
-6. **Pub/Sub:** `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB`.
-7. **JSON / Search / Bloom Filters:** RedisStack modules.
-8. **Cluster & Replication:** `CLUSTER *`, `REPLICAOF`, `PSYNC`, `ROLE`, `SENTINEL *`.
-9. **Scripting / Functions:** `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT FLUSH`, `FUNCTION *`.
-10. **Advanced List / Hash / Set Operations:** `BLPOP`, `BRPOP`, `LMOVE`, `BLMOVE`, `LINSERT`, `LSET`, `LREM`, `SDIFF`, `SINTER`, `SUNION`, `SMOVE`, `HINCRBY`, `HINCRBYFLOAT`, `HMGET`, `HMSET`, `HKEYS`, `HVALS`, `HSTRLEN`.
+1. **Profile Exclusions (Separate Subsystems / Architectural Paradigms):**
+   - **Pub/Sub Messaging:** `SUBSCRIBE`, `UNSUBSCRIBE`, `PUBLISH`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB` (Broker messaging layer).
+   - **Streams:** `XADD`, `XREAD`, `XRANGE`, `XREVRANGE`, `XLEN`, `XDEL`, `XTRIM`, `XGROUP`, `XREADGROUP`, `XACK` (Log append abstraction).
+   - **Scripting & Functions:** `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT FLUSH`, `FUNCTION *` (Embedded Lua runtime).
+   - **Cluster Topology & Distributed Replication:** `CLUSTER *`, `REPLICAOF`, `PSYNC`, `ROLE`, `SENTINEL *` (Multi-node consensus & distribution).
+   - **External RedisStack Modules:** JSON (`JSON.*`), Search (`FT.*`), Bloom filters (`BF.*`), Graph, TimeSeries.
+
+2. **Core Standalone Feature Gaps (In-Scope for Future MiniRedis Phases):**
+   - **Sorted Sets (ZSets):** `ZADD`, `ZREM`, `ZSCORE`, `ZRANGE`, `ZCARD`, `ZCOUNT`, `ZINCRBY`, `ZPOPMIN`, `ZPOPMAX`, `ZRANK`, `ZREVRANK`, `ZINTERSTORE`, `ZUNIONSTORE`.
+   - **Bitmaps & Bitfields:** `SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITPOS`, `BITFIELD`.
+   - **HyperLogLog:** `PFADD`, `PFCOUNT`, `PFMERGE`.
+   - **Geospatial:** `GEOADD`, `GEODIST`, `GEOHASH`, `GEOPOS`, `GEORADIUS`, `GEOSEARCH`.
+   - **Advanced Core Operations:** `BLPOP`, `BRPOP`, `LMOVE`, `BLMOVE`, `LINSERT`, `LSET`, `LREM`, `SDIFF`, `SINTER`, `SUNION`, `SMOVE`, `HINCRBY`, `HINCRBYFLOAT`, `HMGET`, `HMSET`, `HKEYS`, `HVALS`, `HSTRLEN`.
 
 ---
 

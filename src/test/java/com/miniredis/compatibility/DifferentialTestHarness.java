@@ -17,6 +17,12 @@ import java.util.*;
  */
 public class DifferentialTestHarness implements AutoCloseable {
 
+    public enum ReferenceMode {
+        AUTO,
+        LIVE_REFERENCE,
+        GOLDEN_ORACLE
+    }
+
     public static final String DEFAULT_REF_HOST = "127.0.0.1";
     public static final int DEFAULT_REF_PORT = 6380;
 
@@ -27,7 +33,10 @@ public class DifferentialTestHarness implements AutoCloseable {
 
     private final String refHost;
     private final int refPort;
+    private final ReferenceMode configuredMode;
+    private final ReferenceMode activeMode;
     private final boolean refServerAvailable;
+    private final String referenceRedisVersion;
 
     public DifferentialTestHarness() throws IOException {
         this.storage = new StorageEngine();
@@ -46,7 +55,65 @@ public class DifferentialTestHarness implements AutoCloseable {
         }
         this.refHost = host;
         this.refPort = port;
-        this.refServerAvailable = probeServer(this.refHost, this.refPort);
+
+        String modeStr = System.getProperty("redis.ref.mode", System.getenv().getOrDefault("REDIS_REF_MODE", "AUTO")).toUpperCase(Locale.ROOT);
+        ReferenceMode m = ReferenceMode.AUTO;
+        try {
+            m = ReferenceMode.valueOf(modeStr);
+        } catch (IllegalArgumentException ignored) {}
+        this.configuredMode = m;
+
+        boolean probed = probeServer(this.refHost, this.refPort);
+        if (configuredMode == ReferenceMode.LIVE_REFERENCE) {
+            if (!probed) {
+                throw new IllegalStateException(String.format(
+                        "LIVE_REFERENCE mode explicitly requested, but reference Redis server at %s:%d is unreachable. " +
+                        "Failing fast without falling back to GOLDEN_ORACLE.", this.refHost, this.refPort));
+            }
+            this.refServerAvailable = true;
+            this.activeMode = ReferenceMode.LIVE_REFERENCE;
+        } else if (configuredMode == ReferenceMode.GOLDEN_ORACLE) {
+            this.refServerAvailable = false;
+            this.activeMode = ReferenceMode.GOLDEN_ORACLE;
+        } else { // AUTO
+            this.refServerAvailable = probed;
+            this.activeMode = probed ? ReferenceMode.LIVE_REFERENCE : ReferenceMode.GOLDEN_ORACLE;
+        }
+
+        if (this.refServerAvailable) {
+            this.referenceRedisVersion = queryReferenceVersion(this.refHost, this.refPort);
+            System.out.printf("[DIFFERENTIAL HARNESS] Mode: LIVE_REFERENCE_MODE | Host: %s:%d | Reference Redis Version: %s | MiniRedis Version: 1.0.0%n",
+                    this.refHost, this.refPort, this.referenceRedisVersion);
+        } else {
+            this.referenceRedisVersion = "Redis 7.2 (Golden Standard Baseline)";
+            System.out.println("[DIFFERENTIAL HARNESS] Mode: GOLDEN_ORACLE_MODE | Reference Target: Redis 7.2 Standalone Wire Frames");
+        }
+    }
+
+    private static String queryReferenceVersion(String host, int port) {
+        try (Socket socket = new Socket(host, port)) {
+            socket.setSoTimeout(2000);
+            OutputStream out = socket.getOutputStream();
+            InputStream in = socket.getInputStream();
+            sendCommand(out, "INFO server");
+            com.miniredis.commands.RedisResponse resp = RespParser.parseResponse(in);
+            if (resp != null && resp.getStringValue() != null) {
+                for (String line : resp.getStringValue().split("\r\n")) {
+                    if (line.startsWith("redis_version:")) {
+                        return line.split(":")[1].trim();
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return "7.2.x (live probed)";
+    }
+
+    public ReferenceMode getActiveMode() {
+        return activeMode;
+    }
+
+    public String getReferenceRedisVersion() {
+        return referenceRedisVersion;
     }
 
     private static boolean probeServer(String host, int port) {
@@ -129,8 +196,12 @@ public class DifferentialTestHarness implements AutoCloseable {
                     }
 
                     // Compare results with normalization
+                    DifferentialResult.Mode resultMode = (activeMode == ReferenceMode.LIVE_REFERENCE)
+                            ? DifferentialResult.Mode.LIVE_REFERENCE_MODE
+                            : DifferentialResult.Mode.GOLDEN_ORACLE_MODE;
+
                     DifferentialResult result = compareResponses(
-                            testCase.getTestId(), cmd, refResp, miniResp, step.getNormalization());
+                            testCase.getTestId(), cmd, refResp, miniResp, step.getNormalization(), resultMode);
                     results.add(result);
                 }
             } finally {
@@ -150,9 +221,10 @@ public class DifferentialTestHarness implements AutoCloseable {
      */
     public DifferentialResult compareResponses(String testId, String command,
                                                String ref, String mini,
-                                               DifferentialTestCase.NormalizationType norm) {
+                                               DifferentialTestCase.NormalizationType norm,
+                                               DifferentialResult.Mode mode) {
         if (ref == null || mini == null) {
-            return DifferentialResult.mismatch(testId, command, ref, mini, "Null response received");
+            return DifferentialResult.mismatch(testId, command, mode, ref, mini, "Null response received");
         }
 
         // Clean trailing whitespace for consistent line comparison
@@ -160,7 +232,7 @@ public class DifferentialTestHarness implements AutoCloseable {
         String miniTrimmed = mini.trim();
 
         if (refTrimmed.equals(miniTrimmed)) {
-            return DifferentialResult.match(testId, command, miniTrimmed);
+            return DifferentialResult.match(testId, command, mode, miniTrimmed);
         }
 
         // Handle Errors (comparing Redis error prefix and keyword)
@@ -169,18 +241,18 @@ public class DifferentialTestHarness implements AutoCloseable {
             String refPrefix = refTrimmed.split(" ")[0];
             String miniPrefix = miniTrimmed.split(" ")[0];
             if (refPrefix.equalsIgnoreCase(miniPrefix)) {
-                return DifferentialResult.match(testId, command, miniTrimmed);
+                return DifferentialResult.match(testId, command, mode, miniTrimmed);
             }
         }
 
         if (norm == DifferentialTestCase.NormalizationType.TTL_TOLERANCE) {
-            // Compare integer responses with +/- 2s tolerance
+            // Compare integer responses with +/- 3s tolerance
             if (refTrimmed.startsWith(":") && miniTrimmed.startsWith(":")) {
                 try {
                     long refVal = Long.parseLong(refTrimmed.substring(1));
                     long miniVal = Long.parseLong(miniTrimmed.substring(1));
                     if (Math.abs(refVal - miniVal) <= 3) {
-                        return DifferentialResult.match(testId, command, miniTrimmed);
+                        return DifferentialResult.match(testId, command, mode, miniTrimmed);
                     }
                 } catch (NumberFormatException ignored) {}
             }
@@ -189,12 +261,39 @@ public class DifferentialTestHarness implements AutoCloseable {
             Set<String> refElements = parseRespArrayElements(refTrimmed);
             Set<String> miniElements = parseRespArrayElements(miniTrimmed);
             if (refElements.equals(miniElements)) {
-                return DifferentialResult.match(testId, command, miniTrimmed);
+                return DifferentialResult.match(testId, command, mode, miniTrimmed);
             }
         }
 
-        return DifferentialResult.mismatch(testId, command, refTrimmed, miniTrimmed,
+        return DifferentialResult.mismatch(testId, command, mode, refTrimmed, miniTrimmed,
                 String.format("Output mismatch. Expected: '%s', Actual: '%s'", refTrimmed, miniTrimmed));
+    }
+
+    public static void printSummary(List<DifferentialResult> results, String redisVersion) {
+        long matchCount = results.stream().filter(r -> r.getStatus() == DifferentialResult.Status.MATCH).count();
+        long partialCount = results.stream().filter(r -> r.getStatus() == DifferentialResult.Status.PARTIAL_MATCH).count();
+        long mismatchCount = results.stream().filter(r -> r.getStatus() == DifferentialResult.Status.MISMATCH).count();
+        DifferentialResult.Mode mode = results.isEmpty() ? DifferentialResult.Mode.GOLDEN_ORACLE_MODE : results.get(0).getExecutionMode();
+
+        System.out.println("===============================================================================");
+        System.out.println("   DIFFERENTIAL COMPATIBILITY REPORT SUMMARY                                   ");
+        System.out.println("===============================================================================");
+        System.out.printf("Execution Mode:            %s%n", mode);
+        System.out.printf("Reference Redis Version:   %s%n", redisVersion);
+        System.out.println("MiniRedis Engine Version:  1.0.0");
+        System.out.printf("Total Commands Tested:     %d%n", results.size());
+        System.out.printf("Matching Results (Exact):  %d%n", matchCount);
+        System.out.printf("Partial Matches:           %d%n", partialCount);
+        System.out.printf("Mismatches / Failures:     %d%n", mismatchCount);
+        System.out.println("-------------------------------------------------------------------------------");
+        if (mismatchCount > 0) {
+            System.out.println("Detailed Mismatches:");
+            results.stream()
+                    .filter(r -> r.getStatus() == DifferentialResult.Status.MISMATCH)
+                    .forEach(r -> System.out.printf(" - [%s] %s -> %s%n", r.getTestId(), r.getCommand(), r.getFailureReason()));
+            System.out.println("-------------------------------------------------------------------------------");
+        }
+        System.out.println("===============================================================================");
     }
 
     private static Set<String> parseRespArrayElements(String resp) {

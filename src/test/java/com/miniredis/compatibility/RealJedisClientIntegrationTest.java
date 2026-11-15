@@ -1,0 +1,160 @@
+package com.miniredis.compatibility;
+
+import com.miniredis.commands.CommandRegistry;
+import com.miniredis.server.RedisServer;
+import com.miniredis.storage.StorageEngine;
+import org.junit.jupiter.api.*;
+import redis.clients.jedis.DefaultJedisClientConfig;
+import redis.clients.jedis.HostAndPort;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.RedisProtocol;
+import redis.clients.jedis.exceptions.JedisDataException;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@DisplayName("Phase 17: Stage E Real Jedis 5.1.2 Client Library Interoperability")
+public class RealJedisClientIntegrationTest {
+
+    private StorageEngine storage;
+    private CommandRegistry registry;
+    private RedisServer server;
+    private int port;
+
+    @BeforeEach
+    public void setUp() throws IOException {
+        storage = new StorageEngine();
+        registry = new CommandRegistry();
+        // Dynamic ephemeral port
+        server = new RedisServer(0, 20, storage, registry);
+        server.start();
+        port = server.getPort();
+    }
+
+    @AfterEach
+    public void tearDown() {
+        if (server != null) {
+            server.stop();
+        }
+    }
+
+    private Jedis createJedisClient() {
+        DefaultJedisClientConfig config = DefaultJedisClientConfig.builder()
+                .protocol(RedisProtocol.RESP2)
+                .timeoutMillis(3000)
+                .build();
+        return new Jedis(new HostAndPort("127.0.0.1", port), config);
+    }
+
+    @Test
+    @DisplayName("Jedis: Connect, PING, SET, GET, STRLEN, INCR, DEL Operations")
+    public void testStringLifecycle() {
+        try (Jedis jedis = createJedisClient()) {
+            // 1. PING
+            assertEquals("PONG", jedis.ping());
+
+            // 2. SET and GET
+            String setRes = jedis.set("jedis:user:1", "Alice");
+            assertEquals("OK", setRes);
+
+            String getRes = jedis.get("jedis:user:1");
+            assertEquals("Alice", getRes);
+
+            // 3. STRLEN
+            long strlen = jedis.strlen("jedis:user:1");
+            assertEquals(5L, strlen);
+
+            // 4. INCR
+            jedis.set("jedis:counter", "100");
+            long incrRes = jedis.incr("jedis:counter");
+            assertEquals(101L, incrRes);
+
+            // 5. DEL
+            long delRes = jedis.del("jedis:user:1", "jedis:counter");
+            assertEquals(2L, delRes);
+            assertNull(jedis.get("jedis:user:1"));
+        }
+    }
+
+    @Test
+    @DisplayName("Jedis: List (LPUSH, LRANGE) & Set (SADD, SMEMBERS) Collections")
+    public void testCollections() {
+        try (Jedis jedis = createJedisClient()) {
+            // Lists: LPUSH elements (note: last argument becomes head in Redis)
+            long lpushRes = jedis.lpush("jedis:queue", "item1", "item2", "item3");
+            assertEquals(3L, lpushRes);
+
+            List<String> items = jedis.lrange("jedis:queue", 0, -1);
+            assertEquals(3, items.size());
+            assertEquals("item3", items.get(0));
+            assertEquals("item2", items.get(1));
+            assertEquals("item1", items.get(2));
+
+            // Sets: SADD and SMEMBERS
+            long saddRes = jedis.sadd("jedis:tags", "java", "redis", "jedis");
+            assertEquals(3L, saddRes);
+
+            Set<String> tags = jedis.smembers("jedis:tags");
+            assertEquals(3, tags.size());
+            assertTrue(tags.contains("java"));
+            assertTrue(tags.contains("redis"));
+            assertTrue(tags.contains("jedis"));
+
+            jedis.del("jedis:queue", "jedis:tags");
+        }
+    }
+
+    @Test
+    @DisplayName("Jedis: Hash (HSET, HGETALL) and Expiration (EXPIRE, TTL)")
+    public void testHashesAndExpiry() {
+        try (Jedis jedis = createJedisClient()) {
+            // Hashes
+            long hsetRes = jedis.hset("jedis:profile", Map.of(
+                    "username", "krishna",
+                    "role", "architect",
+                    "status", "active"
+            ));
+            assertEquals(3L, hsetRes);
+
+            Map<String, String> profile = jedis.hgetAll("jedis:profile");
+            assertEquals(3, profile.size());
+            assertEquals("krishna", profile.get("username"));
+            assertEquals("architect", profile.get("role"));
+
+            // Expiration: EXPIRE and TTL
+            long expireRes = jedis.expire("jedis:profile", 3600);
+            assertEquals(1L, expireRes);
+
+            long ttl = jedis.ttl("jedis:profile");
+            assertTrue(ttl > 0 && ttl <= 3600, "TTL must be between 1 and 3600 seconds, was: " + ttl);
+
+            jedis.del("jedis:profile");
+        }
+    }
+
+    @Test
+    @DisplayName("Jedis: WRONGTYPE Exception and Disconnect/Reconnect Resilience")
+    public void testErrorHandlingAndReconnect() {
+        // Step 1: WRONGTYPE error throwing standard JedisDataException
+        try (Jedis jedis1 = createJedisClient()) {
+            jedis1.set("jedis:scalar", "string_val");
+            JedisDataException ex = assertThrows(JedisDataException.class, () -> jedis1.lpush("jedis:scalar", "bad_item"));
+            assertTrue(ex.getMessage().contains("WRONGTYPE"), "Must contain WRONGTYPE in error message: " + ex.getMessage());
+
+            // Disconnect
+            jedis1.disconnect();
+            assertFalse(jedis1.isConnected());
+        }
+
+        // Step 2: New connection (reconnect) accessing persisted state
+        try (Jedis jedis2 = createJedisClient()) {
+            assertTrue(jedis2.isConnected() || jedis2.ping().equals("PONG"));
+            assertEquals("string_val", jedis2.get("jedis:scalar"));
+            jedis2.del("jedis:scalar");
+        }
+    }
+}

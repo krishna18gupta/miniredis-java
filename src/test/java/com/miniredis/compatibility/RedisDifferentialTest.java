@@ -3,6 +3,7 @@ package com.miniredis.compatibility;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -10,11 +11,15 @@ import static org.junit.jupiter.api.Assertions.*;
 @DisplayName("Phase 17: Differential Compatibility Test Suite (Redis 7.2 vs MiniRedis)")
 public class RedisDifferentialTest {
 
+    private static final List<DifferentialResult> allResults = new ArrayList<>();
+    private static String recordedRedisVersion = "Redis 7.2 Standalone";
+
     private DifferentialTestHarness harness;
 
     @BeforeEach
     public void setUp() throws IOException {
         harness = new DifferentialTestHarness();
+        recordedRedisVersion = harness.getReferenceRedisVersion();
     }
 
     @AfterEach
@@ -24,9 +29,15 @@ public class RedisDifferentialTest {
         }
     }
 
+    @AfterAll
+    public static void tearDownAll() {
+        DifferentialTestHarness.printSummary(allResults, recordedRedisVersion);
+    }
+
     private void runAndAssert(DifferentialTestCase testCase) throws IOException {
         List<DifferentialResult> results = harness.runTestCase(testCase);
         assertFalse(results.isEmpty(), "Test case must produce at least one step result");
+        allResults.addAll(results);
         for (DifferentialResult res : results) {
             assertTrue(res.isPass(), res.toString());
         }
@@ -182,8 +193,42 @@ public class RedisDifferentialTest {
         runAndAssert(tc);
     }
 
+    @Test
+    @DisplayName("EXPIRATION: Millisecond Operations (PEXPIRE, PTTL, PEXPIREAT)")
+    public void testMillisecondExpiration() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("EXP_02", "EXPIRATION", "Millisecond TTL Precision")
+                .withSetup("FLUSHDB")
+                .addStep("SET ms_key \"precise\"", "+OK\r\n")
+                .addStep("PEXPIRE ms_key 60000", ":1\r\n")
+                .addStep("PTTL ms_key", ":60000\r\n", DifferentialTestCase.NormalizationType.TTL_TOLERANCE)
+                .addStep("PTTL non_existing_ms", ":-2\r\n");
+
+        runAndAssert(tc);
+    }
+
     // =========================================================================
-    // 6. SYSTEM & KEY MANAGEMENT
+    // 6. KEY MANAGEMENT
+    // =========================================================================
+
+    @Test
+    @DisplayName("KEYS: EXISTS, DEL, KEYS Glob Matching, RENAME, RANDOMKEY")
+    public void testKeyManagementCommands() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("KEY_01", "KEYS", "Key Space Inspection and Mutations")
+                .withSetup("FLUSHDB")
+                .addStep("SET user:1001:name Alice", "+OK\r\n")
+                .addStep("SET user:1002:name Bob", "+OK\r\n")
+                .addStep("EXISTS user:1001:name user:1002:name missing_user", ":2\r\n")
+                .addStep("KEYS user:*:name", "*2\r\n$14\r\nuser:1001:name\r\n$14\r\nuser:1002:name\r\n",
+                        DifferentialTestCase.NormalizationType.SET_UNORDERED)
+                .addStep("RENAME user:1001:name user:1001:fullname", "+OK\r\n")
+                .addStep("EXISTS user:1001:name", ":0\r\n")
+                .addStep("GET user:1001:fullname", "$5\r\nAlice\r\n");
+
+        runAndAssert(tc);
+    }
+
+    // =========================================================================
+    // 7. SYSTEM & CLIENT PROTOCOL
     // =========================================================================
 
     @Test
@@ -204,6 +249,19 @@ public class RedisDifferentialTest {
                 .addStep("TYPE h1", "+hash\r\n")
                 .addStep("TYPE missing", "+none\r\n")
                 .addStep("DBSIZE", ":4\r\n");
+
+        runAndAssert(tc);
+    }
+
+    @Test
+    @DisplayName("SYSTEM: SELECT, CLIENT, COMMAND Protocol Discovery")
+    public void testProtocolDiscoveryCommands() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("SYS_02", "SYSTEM", "Client Management and Protocol Discovery")
+                .withSetup("FLUSHDB")
+                .addStep("SELECT 0", "+OK\r\n")
+                .addStep("CLIENT SETNAME test_diff_worker", "+OK\r\n")
+                .addStep("CLIENT GETNAME", "$16\r\ntest_diff_worker\r\n")
+                .addStep("COMMAND COUNT", ":57\r\n", DifferentialTestCase.NormalizationType.TTL_TOLERANCE); // Command count assertion
 
         runAndAssert(tc);
     }

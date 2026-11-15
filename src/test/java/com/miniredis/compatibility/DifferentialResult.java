@@ -12,35 +12,46 @@ public class DifferentialResult {
         ERROR
     }
 
+    public enum Mode {
+        LIVE_REFERENCE_MODE,
+        GOLDEN_ORACLE_MODE
+    }
+
     private final String testId;
     private final String command;
     private final Status status;
+    private final Mode executionMode;
     private final String referenceOutput;
     private final String miniredisOutput;
     private final String failureReason;
 
-    public DifferentialResult(String testId, String command, Status status,
+    public DifferentialResult(String testId, String command, Status status, Mode executionMode,
                               String referenceOutput, String miniredisOutput, String failureReason) {
         this.testId = testId;
         this.command = command;
         this.status = status;
+        this.executionMode = executionMode;
         this.referenceOutput = referenceOutput;
         this.miniredisOutput = miniredisOutput;
         this.failureReason = failureReason;
     }
 
-    public static DifferentialResult match(String testId, String command, String output) {
-        return new DifferentialResult(testId, command, Status.MATCH, output, output, null);
+    public static DifferentialResult match(String testId, String command, Mode mode, String output) {
+        return new DifferentialResult(testId, command, Status.MATCH, mode, output, output, null);
     }
 
-    public static DifferentialResult mismatch(String testId, String command,
+    public static DifferentialResult mismatch(String testId, String command, Mode mode,
                                               String referenceOutput, String miniredisOutput, String reason) {
-        return new DifferentialResult(testId, command, Status.MISMATCH, referenceOutput, miniredisOutput, reason);
+        return new DifferentialResult(testId, command, Status.MISMATCH, mode, referenceOutput, miniredisOutput, reason);
     }
 
-    public static DifferentialResult partialMatch(String testId, String command,
+    public static DifferentialResult partialMatch(String testId, String command, Mode mode,
                                                   String referenceOutput, String miniredisOutput, String reason) {
-        return new DifferentialResult(testId, command, Status.PARTIAL_MATCH, referenceOutput, miniredisOutput, reason);
+        return new DifferentialResult(testId, command, Status.PARTIAL_MATCH, mode, referenceOutput, miniredisOutput, reason);
+    }
+
+    public Mode getExecutionMode() {
+        return executionMode;
     }
 
     public String getTestId() {
@@ -73,8 +84,8 @@ public class DifferentialResult {
 
     @Override
     public String toString() {
-        return String.format("[%s] Test %s | Cmd: '%s' | Status: %s%s",
-                isPass() ? "PASS" : "FAIL", testId, command, status,
+        return String.format("[%s][%s] Test %s | Cmd: '%s' | Status: %s%s",
+                executionMode, isPass() ? "PASS" : "FAIL", testId, command, status,
                 failureReason != null ? " (" + failureReason + ")" : "");
     }
 }
