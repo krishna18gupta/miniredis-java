@@ -23,7 +23,7 @@ To avoid conflating partial implementations with true compatibility, MiniRedis s
 
 ## 2. Command Compatibility Inventory Matrix
 
-Below is the comprehensive audit of all **57 commands implemented in MiniRedis**, organized by functional category against Redis 7.2 standalone behavior.
+Below is the comprehensive audit of all **60 commands implemented in MiniRedis**, organized by functional category against Redis 7.2 standalone behavior.
 
 ### 2.1 String Commands
 
@@ -49,10 +49,13 @@ Below is the comprehensive audit of all **57 commands implemented in MiniRedis**
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **`LPUSH`** | Prepends one or multiple elements. Last argument is at the new head. | `LPushCommand` | Implemented, Public-Demo | Passed (Phase 2, EdgeCases, live) | Matches Redis multi-argument insertion order: `LPUSH k a b` results in `[b, a]`. Auto-creates key. |
 | **`RPUSH`** | Appends one or multiple elements to list tail. | `RPushCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Appends in order. Auto-creates list. |
-| **`LPOP`** | Removes and returns first element. Redis 7.2 supports optional `[count]`. | `LPopCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Supports single element pop. Optional `count` argument from Redis 6.2+ is not yet implemented. Removes key if empty. |
-| **`RPOP`** | Removes and returns last element. Redis 7.2 supports optional `[count]`. | `RPopCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Supports single element pop. Optional `count` argument not yet implemented. Removes key if empty. |
+| **`LPOP`** | Removes and returns first element(s). Optional `[count]` returns array. | `LPopCommand` | Implemented, Public-Demo | Passed (ListCommandParityTest, live) | Fully compatible with Redis 7.2.17. Single form returns bulk string; COUNT form returns array (null array on missing key, empty array on count 0). Removes key and TTL if list becomes empty. |
+| **`RPOP`** | Removes and returns last element(s). Optional `[count]` returns array. | `RPopCommand` | Implemented, Public-Demo | Passed (ListCommandParityTest, live) | Fully compatible with Redis 7.2.17. Single form returns bulk string; COUNT form returns array (null array on missing key, empty array on count 0). Removes key and TTL if list becomes empty. |
 | **`LLEN`** | Returns length of list. 0 if key does not exist. Error on wrong type. | `LLenCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Fully compatible. |
 | **`LRANGE`** | Returns slice of list. Supports 0-based and negative indices. | `LRangeCommand` | Implemented, Public-Demo | Passed (Phase 2, EdgeCases, live) | Fully compatible with 0-based, negative (`-1` = last), and out-of-bound index normalization. |
+| **`LINDEX`** | Returns element at index. Negative indices count from tail. | `LIndexCommand` | Implemented, Public-Demo | Passed (ListCommandParityTest, live) | Fully compatible with Redis 7.2.17. 0-based and negative indexing. Returns nil for out-of-range or missing key. |
+| **`LSET`** | Sets list element at index. Error on missing key or out of range. | `LSetCommand` | Implemented, Public-Demo | Passed (ListCommandParityTest, live) | Fully compatible with Redis 7.2.17. Supports negative index. Returns `ERR no such key` and `ERR index out of range`. |
+| **`LINSERT`**| Inserts element BEFORE or AFTER pivot. Case-insensitive position token. | `LInsertCommand` | Implemented, Public-Demo | Passed (ListCommandParityTest, live) | Fully compatible with Redis 7.2.17. Binary pivot matching via `ByteSequence.equals`. Returns 0 if key missing, -1 if pivot not found. |
 
 ---
 

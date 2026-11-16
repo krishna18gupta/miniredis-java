@@ -845,6 +845,184 @@ public class StorageEngine {
         return res != null ? res.toUtf8String() : null;
     }
 
+    public List<ByteSequence> lpopBytes(ByteSequence key, int count) {
+        Objects.requireNonNull(key, "key cannot be null");
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0");
+        }
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            RedisValue existing = getInternal(key);
+            if (existing == null) {
+                return null;
+            }
+            if (existing.getType() != RedisDataType.LIST) {
+                throw new WrongTypeException();
+            }
+            if (count == 0) {
+                return Collections.emptyList();
+            }
+            LinkedList<ByteSequence> list = existing.getAsByteList();
+            int toPop = Math.min(count, list.size());
+            List<ByteSequence> popped = new ArrayList<>(toPop);
+            for (int i = 0; i < toPop; i++) {
+                popped.add(list.pollFirst());
+            }
+            if (list.isEmpty()) {
+                store.remove(key);
+            }
+            if (toPop > 0) {
+                bumpKeyVersion(key);
+            }
+            return popped;
+        }
+    }
+
+    public List<String> lpop(String key, int count) {
+        List<ByteSequence> bytes = lpopBytes(ByteSequence.ofUtf8(key), count);
+        if (bytes == null) return null;
+        List<String> result = new ArrayList<>(bytes.size());
+        for (ByteSequence b : bytes) {
+            result.add(b != null ? b.toUtf8String() : null);
+        }
+        return result;
+    }
+
+    public List<ByteSequence> rpopBytes(ByteSequence key, int count) {
+        Objects.requireNonNull(key, "key cannot be null");
+        if (count < 0) {
+            throw new IllegalArgumentException("count must be >= 0");
+        }
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            RedisValue existing = getInternal(key);
+            if (existing == null) {
+                return null;
+            }
+            if (existing.getType() != RedisDataType.LIST) {
+                throw new WrongTypeException();
+            }
+            if (count == 0) {
+                return Collections.emptyList();
+            }
+            LinkedList<ByteSequence> list = existing.getAsByteList();
+            int toPop = Math.min(count, list.size());
+            List<ByteSequence> popped = new ArrayList<>(toPop);
+            for (int i = 0; i < toPop; i++) {
+                popped.add(list.pollLast());
+            }
+            if (list.isEmpty()) {
+                store.remove(key);
+            }
+            if (toPop > 0) {
+                bumpKeyVersion(key);
+            }
+            return popped;
+        }
+    }
+
+    public List<String> rpop(String key, int count) {
+        List<ByteSequence> bytes = rpopBytes(ByteSequence.ofUtf8(key), count);
+        if (bytes == null) return null;
+        List<String> result = new ArrayList<>(bytes.size());
+        for (ByteSequence b : bytes) {
+            result.add(b != null ? b.toUtf8String() : null);
+        }
+        return result;
+    }
+
+    public ByteSequence lindexBytes(ByteSequence key, long index) {
+        Objects.requireNonNull(key, "key cannot be null");
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
+            RedisValue val = getAndCheckType(key, RedisDataType.LIST);
+            if (val == null) return null;
+            LinkedList<ByteSequence> list = val.getAsByteList();
+            int size = list.size();
+            long targetIdx = (index >= 0) ? index : (size + index);
+            if (targetIdx < 0 || targetIdx >= size) {
+                return null;
+            }
+            return list.get((int) targetIdx);
+        }
+    }
+
+    public String lindex(String key, long index) {
+        ByteSequence res = lindexBytes(ByteSequence.ofUtf8(key), index);
+        return res != null ? res.toUtf8String() : null;
+    }
+
+    public enum LSetStatus {
+        OK,
+        NO_SUCH_KEY,
+        INDEX_OUT_OF_RANGE
+    }
+
+    public LSetStatus lsetBytes(ByteSequence key, long index, ByteSequence element) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(element, "element cannot be null");
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            RedisValue val = getInternal(key);
+            if (val == null) {
+                return LSetStatus.NO_SUCH_KEY;
+            }
+            if (val.getType() != RedisDataType.LIST) {
+                throw new WrongTypeException();
+            }
+            LinkedList<ByteSequence> list = val.getAsByteList();
+            int size = list.size();
+            long targetIdx = (index >= 0) ? index : (size + index);
+            if (targetIdx < 0 || targetIdx >= size) {
+                return LSetStatus.INDEX_OUT_OF_RANGE;
+            }
+            list.set((int) targetIdx, element);
+            bumpKeyVersion(key);
+            return LSetStatus.OK;
+        }
+    }
+
+    public LSetStatus lset(String key, long index, String element) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(element, "element cannot be null");
+        return lsetBytes(ByteSequence.ofUtf8(key), index, ByteSequence.ofUtf8(element));
+    }
+
+    public int linsertBytes(ByteSequence key, boolean before, ByteSequence pivot, ByteSequence element) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(pivot, "pivot cannot be null");
+        Objects.requireNonNull(element, "element cannot be null");
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            RedisValue val = getInternal(key);
+            if (val == null) {
+                return 0;
+            }
+            if (val.getType() != RedisDataType.LIST) {
+                throw new WrongTypeException();
+            }
+            LinkedList<ByteSequence> list = val.getAsByteList();
+            int pivotIdx = -1;
+            int i = 0;
+            for (ByteSequence item : list) {
+                if (item.equals(pivot)) {
+                    pivotIdx = i;
+                    break;
+                }
+                i++;
+            }
+            if (pivotIdx == -1) {
+                return -1;
+            }
+            int insertIdx = before ? pivotIdx : pivotIdx + 1;
+            list.add(insertIdx, element);
+            bumpKeyVersion(key);
+            return list.size();
+        }
+    }
+
+    public int linsert(String key, boolean before, String pivot, String element) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(pivot, "pivot cannot be null");
+        Objects.requireNonNull(element, "element cannot be null");
+        return linsertBytes(ByteSequence.ofUtf8(key), before, ByteSequence.ofUtf8(pivot), ByteSequence.ofUtf8(element));
+    }
+
     public int llen(ByteSequence key) {
         try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
             RedisValue val = getAndCheckType(key, RedisDataType.LIST);

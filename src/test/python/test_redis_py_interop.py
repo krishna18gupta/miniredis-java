@@ -70,6 +70,22 @@ def run_tests(host="127.0.0.1", port=6379):
     client.delete("py:jobs")
     print("  [PASS] Lists: RPUSH, LRANGE, LLEN, LPOP")
 
+    # 3b. LISTS: LINDEX, LSET, LINSERT, LPOP/RPOP with count
+    client.rpush("py:tasks", "task1", "task2", "task3", "task4")
+    assert client.lindex("py:tasks", 0) == "task1"
+    assert client.lindex("py:tasks", -1) == "task4"
+    assert client.lset("py:tasks", 1, "task2_mod") is True
+    assert client.lindex("py:tasks", 1) == "task2_mod"
+    assert client.linsert("py:tasks", "BEFORE", "task2_mod", "task1_5") == 5
+    popped_l = client.lpop("py:tasks", 2)
+    assert popped_l == ["task1", "task1_5"], f"LPOP count failed: {popped_l}"
+    popped_r = client.rpop("py:tasks", 2)
+    assert popped_r == ["task4", "task3"], f"RPOP count failed: {popped_r}"
+    assert client.lpop("py:tasks") == "task2_mod"
+    assert client.lpop("py:tasks") is None
+    client.delete("py:tasks")
+    print("  [PASS] Lists extended: LINDEX, LSET, LINSERT, LPOP/RPOP count")
+
     # 4. SETS: SADD, SISMEMBER, SMEMBERS, SCARD, SREM
     client.sadd("py:frameworks", "fastapi", "django", "flask")
     assert client.scard("py:frameworks") == 3

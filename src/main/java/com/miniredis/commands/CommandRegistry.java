@@ -50,13 +50,16 @@ public class CommandRegistry {
         register(new AppendCommand());
         register(new StrLenCommand());
 
-        // Phase 2: Lists (6)
+        // Phase 2: Lists (6 -> 9)
         register(new LPushCommand());
         register(new RPushCommand());
         register(new LPopCommand());
         register(new RPopCommand());
         register(new LLenCommand());
         register(new LRangeCommand());
+        register(new LIndexCommand());
+        register(new LSetCommand());
+        register(new LInsertCommand());
 
         // Phase 2: Sets (5)
         register(new SAddCommand());
@@ -468,8 +471,6 @@ public class CommandRegistry {
             case "INCR":
             case "DECR":
             case "STRLEN":
-            case "LPOP":
-            case "RPOP":
             case "LLEN":
             case "SMEMBERS":
             case "SCARD":
@@ -482,6 +483,51 @@ public class CommandRegistry {
             case "TYPE":
                 if (args.size() != 1) {
                     return RedisResponse.error("ERR wrong number of arguments for '" + lower + "' command");
+                }
+                return null;
+            case "LPOP":
+            case "RPOP":
+                if (args.isEmpty() || args.size() > 2) {
+                    return RedisResponse.error("ERR wrong number of arguments for '" + lower + "' command");
+                }
+                if (args.size() == 2) {
+                    try {
+                        long cnt = Long.parseLong(args.get(1).toUtf8String());
+                        if (cnt < 0) {
+                            return RedisResponse.error("ERR value is out of range, must be positive");
+                        }
+                    } catch (NumberFormatException e) {
+                        return RedisResponse.error("ERR value is not an integer or out of range");
+                    }
+                }
+                return null;
+            case "LINDEX":
+                if (args.size() != 2) {
+                    return RedisResponse.error("ERR wrong number of arguments for 'lindex' command");
+                }
+                try {
+                    Long.parseLong(args.get(1).toUtf8String());
+                } catch (NumberFormatException e) {
+                    return RedisResponse.error("ERR value is not an integer or out of range");
+                }
+                return null;
+            case "LSET":
+                if (args.size() != 3) {
+                    return RedisResponse.error("ERR wrong number of arguments for 'lset' command");
+                }
+                try {
+                    Long.parseLong(args.get(1).toUtf8String());
+                } catch (NumberFormatException e) {
+                    return RedisResponse.error("ERR value is not an integer or out of range");
+                }
+                return null;
+            case "LINSERT":
+                if (args.size() != 4) {
+                    return RedisResponse.error("ERR wrong number of arguments for 'linsert' command");
+                }
+                String pos = args.get(1).toUtf8String().toUpperCase(Locale.ROOT);
+                if (!"BEFORE".equals(pos) && !"AFTER".equals(pos)) {
+                    return RedisResponse.error("ERR syntax error");
                 }
                 return null;
             case "INCRBY":
@@ -543,7 +589,7 @@ public class CommandRegistry {
     private boolean isMutatingCommand(String commandName) {
         return switch (commandName) {
             case "SET", "SETEX", "DEL", "FLUSHDB", "MSET", "INCR", "DECR", "INCRBY", "DECRBY", "APPEND",
-                 "LPUSH", "RPUSH", "LPOP", "RPOP", "SADD", "SREM", "HSET", "HDEL",
+                 "LPUSH", "RPUSH", "LPOP", "RPOP", "LSET", "LINSERT", "SADD", "SREM", "HSET", "HDEL",
                  "EXPIRE", "PEXPIRE", "PEXPIREAT", "PERSIST", "RENAME" -> true;
             default -> false;
         };
@@ -682,6 +728,8 @@ public class CommandRegistry {
             case "RPUSH":
             case "LPOP":
             case "RPOP":
+            case "LSET":
+            case "LINSERT":
             case "SADD":
             case "SREM":
             case "HSET":

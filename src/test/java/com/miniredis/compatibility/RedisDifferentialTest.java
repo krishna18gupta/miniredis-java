@@ -151,6 +151,38 @@ public class RedisDifferentialTest {
         runAndAssert(tc);
     }
 
+    @Test
+    @DisplayName("LISTS: Complete Redis 7.2 Parity (LPOP/RPOP COUNT, LINDEX, LSET, LINSERT)")
+    public void testListExtendedParity() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("LIST_03", "LISTS", "Extended List Operations Parity")
+                .withSetup("FLUSHDB")
+                .addStep("RPUSH diff_list one two three four", ":4\r\n")
+                .addStep("LINDEX diff_list 0", "$3\r\none\r\n")
+                .addStep("LINDEX diff_list -1", "$4\r\nfour\r\n")
+                .addStep("LINDEX diff_list 10", "$-1\r\n")
+                .addStep("LINDEX diff_list -10", "$-1\r\n")
+                .addStep("LSET diff_list 1 TWO_MOD", "+OK\r\n")
+                .addStep("LINDEX diff_list 1", "$7\r\nTWO_MOD\r\n")
+                .addStep("LSET diff_list -1 FOUR_MOD", "+OK\r\n")
+                .addStep("LINDEX diff_list -1", "$8\r\nFOUR_MOD\r\n")
+                .addStep("LSET diff_list 10 val", "-ERR index out of range\r\n")
+                .addStep("LSET no_list 0 val", "-ERR no such key\r\n")
+                .addStep("LINSERT diff_list BEFORE TWO_MOD one_and_half", ":5\r\n")
+                .addStep("LINSERT diff_list AFTER FOUR_MOD five", ":6\r\n")
+                .addStep("LINSERT diff_list BEFORE nonexistent_pivot val", ":-1\r\n")
+                .addStep("LINSERT no_list BEFORE pivot val", ":0\r\n")
+                .addStep("LINSERT diff_list INVALID_POS pivot val", "-ERR syntax error\r\n")
+                .addStep("LPOP diff_list 2", "*2\r\n$3\r\none\r\n$12\r\none_and_half\r\n")
+                .addStep("RPOP diff_list 2", "*2\r\n$4\r\nfive\r\n$8\r\nFOUR_MOD\r\n")
+                .addStep("LPOP diff_list 0", "*0\r\n")
+                .addStep("LPOP missing_list 0", "*-1\r\n")
+                .addStep("LPOP diff_list -1", "-ERR value is out of range, must be positive\r\n")
+                .addStep("LPOP diff_list 10", "*2\r\n$7\r\nTWO_MOD\r\n$5\r\nthree\r\n")
+                .addStep("EXISTS diff_list", ":0\r\n");
+
+        runAndAssert(tc);
+    }
+
     // =========================================================================
     // 3. SETS
     // =========================================================================

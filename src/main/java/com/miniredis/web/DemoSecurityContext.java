@@ -50,18 +50,18 @@ public class DemoSecurityContext {
     // Strict Public Command Allowlist
     private static final Set<String> ALLOWED_COMMANDS = Set.of(
             // Read Operations
-            "GET", "MGET", "STRLEN", "EXISTS", "TYPE", "TTL", "PTTL", "LLEN", "LRANGE",
+            "GET", "MGET", "STRLEN", "EXISTS", "TYPE", "TTL", "PTTL", "LLEN", "LRANGE", "LINDEX",
             "SCARD", "SISMEMBER", "SMEMBERS", "HGET", "HGETALL", "HEXISTS", "DBSIZE",
             "PING", "ECHO", "HELLO", "KEYS", "INFO",
             // Write Operations (Session-Isolated)
-            "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "SADD", "SREM",
+            "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "LSET", "LINSERT", "SADD", "SREM",
             "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL",
             "INCR", "DECR", "INCRBY", "DECRBY", "APPEND"
     );
 
     // Mutating Command Names
     private static final Set<String> MUTATING_COMMANDS = Set.of(
-            "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "SADD", "SREM",
+            "SET", "SETEX", "MSET", "LPUSH", "RPUSH", "LPOP", "RPOP", "LSET", "LINSERT", "SADD", "SREM",
             "HSET", "HDEL", "EXPIRE", "PEXPIRE", "PERSIST", "DEL",
             "INCR", "DECR", "INCRBY", "DECRBY", "APPEND"
     );
@@ -329,6 +329,15 @@ public class DemoSecurityContext {
                     return RedisResponse.error(String.format("ERR value exceeds maximum allowed size of %d bytes", MAX_VALUE_BYTES));
                 }
             }
+        } else if ("LINSERT".equals(command)) {
+            String internalKey = toInternalKey(sessionId, primaryKey);
+            RedisValue existing = storage.get(internalKey);
+            if (existing != null && existing.getType() == RedisDataType.LIST) {
+                int currentCount = existing.getAsList().size();
+                if (currentCount + 1 > MAX_COLLECTION_ITEMS) {
+                    return RedisResponse.error(String.format("ERR collection size limit reached (%d items maximum per collection)", MAX_COLLECTION_ITEMS));
+                }
+            }
         }
 
         // Check value size limits
@@ -346,7 +355,7 @@ public class DemoSecurityContext {
         }
 
         // Check session and keyspace limits on mutating writes
-        if (isMutating && !command.equals("DEL") && !command.equals("LPOP") && !command.equals("RPOP") && !command.equals("SREM") && !command.equals("HDEL")) {
+        if (isMutating && !command.equals("DEL") && !command.equals("LPOP") && !command.equals("RPOP") && !command.equals("SREM") && !command.equals("HDEL") && !command.equals("LSET") && !command.equals("LINSERT")) {
             String targetInternal = toInternalKey(sessionId, primaryKey);
             if (storage.get(targetInternal) == null) {
                 if (countSessionKeys(sessionId) >= MAX_KEYS_PER_SESSION) {

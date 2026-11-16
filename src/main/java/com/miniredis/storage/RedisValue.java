@@ -35,7 +35,11 @@ public class RedisValue {
     }
 
     public static RedisValue ofByteList(Deque<ByteSequence> list) {
-        return new RedisValue(RedisDataType.LIST, Objects.requireNonNull(list, "list cannot be null"));
+        Objects.requireNonNull(list, "list cannot be null");
+        LinkedList<ByteSequence> linkedList = (list instanceof LinkedList)
+                ? (LinkedList<ByteSequence>) list
+                : new LinkedList<>(list);
+        return new RedisValue(RedisDataType.LIST, linkedList);
     }
 
     public static RedisValue ofList() {
@@ -122,11 +126,11 @@ public class RedisValue {
     }
 
     @SuppressWarnings("unchecked")
-    public Deque<ByteSequence> getAsByteList() {
+    public LinkedList<ByteSequence> getAsByteList() {
         if (type != RedisDataType.LIST) {
             throw new WrongTypeException();
         }
-        return (Deque<ByteSequence>) data;
+        return (LinkedList<ByteSequence>) data;
     }
 
     public Deque<String> getAsList() {

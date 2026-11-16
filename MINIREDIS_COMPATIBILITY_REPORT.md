@@ -25,11 +25,11 @@ To ground this mission in technical reality, we strictly categorize commands int
 
 - **Target Standalone Core Scope (Redis 7.2 Basic Operations):** 75 core commands (Strings, Hashes, Lists, Sets, Keys, Expiration, Transactions, Server Utilities).
   - *Excludes optional modules:* Streams, Pub/Sub, Cluster, Lua Scripting, Functions, Bitmaps, HyperLogLog, Geospatial.
-- **Commands Implemented in MiniRedis:** **57**
-- **Commands Passing Differential Verification:** **49**
-- **Commands Partially Compatible:** **8** (Feature gaps in secondary flags such as multi-DB `SELECT`, List count pops, etc.)
-- **Core Scope Compatibility Ratio:** **$65.3\%$** ($49 / 75$)
-- **Implemented Scope Compatibility Ratio:** **$86.0\%$** ($49 / 57$)
+- **Commands Implemented in MiniRedis:** **60**
+- **Commands Passing Differential Verification:** **54**
+- **Commands Partially Compatible:** **6** (Feature gaps in secondary flags such as multi-DB `SELECT`, etc.)
+- **Core Scope Compatibility Ratio:** **$72.0\%$** ($54 / 75$)
+- **Implemented Scope Compatibility Ratio:** **$90.0\%$** ($54 / 60$)
 
 ---
 
@@ -149,8 +149,8 @@ During Stage 3 and Stage 4 differential testing, two concrete compatibility gaps
 | :--- | :--- | :--- | :--- |
 | **Encoding Model** | Binary-safe C SDS byte buffers | Native immutable `ByteSequence` throughout pipeline | **VERIFIED COMPATIBLE**: Completed in Stage A. Binary payloads containing `\x00`, CRLF, and non-UTF-8 bytes preserved without loss. |
 | **`SET` Options** | Supports `[NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT\|KEEPTTL]` | Supports `[NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT\|KEEPTTL]` | **VERIFIED COMPATIBLE**: Completed in Stage B. 100% parity with Redis 7.2.17 standalone syntax, semantics, and AOF normalization. |
+| **List Operations**| `LPOP/RPOP [count]`, `LINDEX`, `LSET`, `LINSERT` | Full Redis 7.2.17 List command parity | **VERIFIED COMPATIBLE**: Completed in Stage C. Single/COUNT pop forms, 0-based/negative indexing, binary pivot insertion. |
 | **Multiple Databases**| Supports DB 0 through 15 | Only DB 0 active; `SELECT 0` returns OK, `SELECT > 0` returns error | Single database standalone operation. |
-| **List Bulk Pops** | `LPOP key [count]`, `RPOP key [count]` (Redis 6.2+) | Single element pop only | Multi-element popping requires multiple single pop calls. |
 | **Hash Increments** | `HINCRBY key field increment` | Not yet implemented | Hash field increments require client-side get-increment-set. |
 | **Set Operations** | `SINTER`, `SUNION`, `SDIFF` (Set algebra) | Basic membership (`SADD`, `SREM`, `SMEMBERS`) | Inter-set intersections/unions not yet implemented. |
 

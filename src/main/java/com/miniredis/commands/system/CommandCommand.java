@@ -19,7 +19,7 @@ public class CommandCommand implements Command {
     private static final List<String> ALL_COMMANDS = List.of(
             "SET", "GET", "DEL", "EXISTS", "KEYS", "FLUSHDB", "DBSIZE",
             "APPEND", "STRLEN", "MSET", "MGET", "INCR", "DECR", "INCRBY", "DECRBY",
-            "LPUSH", "RPUSH", "LPOP", "RPOP", "LLEN", "LRANGE",
+            "LPUSH", "RPUSH", "LPOP", "RPOP", "LLEN", "LRANGE", "LINDEX", "LSET", "LINSERT",
             "SADD", "SMEMBERS", "SISMEMBER", "SREM", "SCARD",
             "HSET", "HGET", "HGETALL", "HDEL", "HEXISTS",
             "EXPIRE", "PEXPIRE", "PEXPIREAT", "TTL", "PTTL", "PERSIST", "SETEX",

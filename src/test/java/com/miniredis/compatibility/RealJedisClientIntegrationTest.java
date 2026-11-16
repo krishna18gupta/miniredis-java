@@ -192,4 +192,43 @@ public class RealJedisClientIntegrationTest {
             jedis.del("jedis:opt:1");
         }
     }
+
+    @Test
+    @DisplayName("Jedis: List Parity (LPOP/RPOP COUNT, LINDEX, LSET, LINSERT)")
+    public void testListExtendedOperations() {
+        try (Jedis jedis = createJedisClient()) {
+            jedis.rpush("jedis:list", "first", "second", "third", "fourth");
+
+            // LINDEX
+            assertEquals("first", jedis.lindex("jedis:list", 0));
+            assertEquals("fourth", jedis.lindex("jedis:list", -1));
+            assertNull(jedis.lindex("jedis:list", 100));
+
+            // LSET
+            assertEquals("OK", jedis.lset("jedis:list", 1, "SECOND_MOD"));
+            assertEquals("SECOND_MOD", jedis.lindex("jedis:list", 1));
+
+            // LINSERT
+            long insRes = jedis.linsert("jedis:list", redis.clients.jedis.args.ListPosition.BEFORE, "SECOND_MOD", "between");
+            assertEquals(5L, insRes);
+            assertEquals("between", jedis.lindex("jedis:list", 1));
+
+            // LPOP with count
+            List<String> poppedL = jedis.lpop("jedis:list", 2);
+            assertEquals(2, poppedL.size());
+            assertEquals("first", poppedL.get(0));
+            assertEquals("between", poppedL.get(1));
+
+            // RPOP with count
+            List<String> poppedR = jedis.rpop("jedis:list", 2);
+            assertEquals(2, poppedR.size());
+            assertEquals("fourth", poppedR.get(0));
+            assertEquals("third", poppedR.get(1));
+
+            // 1 element remaining: SECOND_MOD
+            assertEquals(1L, jedis.llen("jedis:list"));
+            assertEquals("SECOND_MOD", jedis.lpop("jedis:list"));
+            assertNull(jedis.lpop("jedis:list"));
+        }
+    }
 }
