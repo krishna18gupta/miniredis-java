@@ -6,6 +6,7 @@ import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class HDelCommand implements Command {
@@ -19,14 +20,11 @@ public class HDelCommand implements Command {
         if (args.size() < 2) {
             return RedisResponse.error("ERR wrong number of arguments for 'hdel' command");
         }
-        String key = args.get(0);
-        List<String> fields = args.subList(1, args.size());
-        try {
-            int removed = storage.hdel(key, fields);
-            return RedisResponse.integer(removed);
-        } catch (WrongTypeException e) {
-            return RedisResponse.error(e.getMessage());
+        List<ByteSequence> byteArgs = new ArrayList<>(args.size());
+        for (String arg : args) {
+            byteArgs.add(arg != null ? ByteSequence.ofUtf8(arg) : ByteSequence.EMPTY);
         }
+        return executeBytes(byteArgs, storage);
     }
 
     @Override
@@ -38,7 +36,7 @@ public class HDelCommand implements Command {
         List<ByteSequence> fields = args.subList(1, args.size());
         try {
             int removed = storage.hdelBytes(key, fields);
-            return RedisResponse.integer(removed);
+            return RedisResponse.integer(removed).withMutated(removed > 0);
         } catch (WrongTypeException e) {
             return RedisResponse.error(e.getMessage());
         }

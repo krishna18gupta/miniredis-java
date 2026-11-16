@@ -1205,12 +1205,14 @@ public class StorageEngine {
     // Phase 2: Hashes
     // ==========================================
 
-    public int hsetBytes(ByteSequence key, Map<ByteSequence, ByteSequence> fieldValues) {
+    public int hsetBytes(ByteSequence key, List<ByteSequence> fieldPairs) {
         Objects.requireNonNull(key, "key cannot be null");
-        Objects.requireNonNull(fieldValues, "fieldValues cannot be null");
+        Objects.requireNonNull(fieldPairs, "fieldPairs cannot be null");
+        if (fieldPairs.isEmpty() || fieldPairs.size() % 2 != 0) {
+            throw new IllegalArgumentException("fieldPairs must contain a non-empty even number of elements");
+        }
         long currentNow = now();
         AtomicInteger newFields = new AtomicInteger(0);
-        AtomicBoolean anyChanged = new AtomicBoolean(false);
 
         try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
             store.compute(key, (k, existing) -> {
@@ -1219,33 +1221,51 @@ public class StorageEngine {
                 if (existing.getType() != RedisDataType.HASH) throw new WrongTypeException();
                 Map<ByteSequence, ByteSequence> map = existing.getAsByteHash();
                 int count = 0;
-                for (Map.Entry<ByteSequence, ByteSequence> entry : fieldValues.entrySet()) {
-                    ByteSequence prev = map.put(entry.getKey(), entry.getValue());
+                for (int i = 0; i < fieldPairs.size(); i += 2) {
+                    ByteSequence field = fieldPairs.get(i);
+                    ByteSequence value = fieldPairs.get(i + 1);
+                    ByteSequence prev = map.put(field, value);
                     if (prev == null) {
                         count++;
-                    }
-                    if (!Objects.equals(prev, entry.getValue())) {
-                        anyChanged.set(true);
                     }
                 }
                 newFields.set(count);
                 return existing;
             });
-            if (anyChanged.get()) {
-                bumpKeyVersion(key);
-            }
+            // Redis 7.2: signalModifiedKey is called whenever HSET completes on a hash key
+            bumpKeyVersion(key);
             return newFields.get();
         }
+    }
+
+    public int hsetBytes(ByteSequence key, Map<ByteSequence, ByteSequence> fieldValues) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(fieldValues, "fieldValues cannot be null");
+        List<ByteSequence> pairs = new ArrayList<>(fieldValues.size() * 2);
+        for (Map.Entry<ByteSequence, ByteSequence> entry : fieldValues.entrySet()) {
+            pairs.add(entry.getKey());
+            pairs.add(entry.getValue());
+        }
+        return hsetBytes(key, pairs);
+    }
+
+    public int hsetBytes(ByteSequence key, ByteSequence field, ByteSequence value) {
+        return hsetBytes(key, List.of(field, value));
     }
 
     public int hset(String key, Map<String, String> fieldValues) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(fieldValues, "fieldValues cannot be null");
-        Map<ByteSequence, ByteSequence> byteMap = new LinkedHashMap<>(fieldValues.size());
+        List<ByteSequence> pairs = new ArrayList<>(fieldValues.size() * 2);
         for (Map.Entry<String, String> entry : fieldValues.entrySet()) {
-            byteMap.put(ByteSequence.ofUtf8(entry.getKey()), ByteSequence.ofUtf8(entry.getValue()));
+            pairs.add(ByteSequence.ofUtf8(entry.getKey()));
+            pairs.add(ByteSequence.ofUtf8(entry.getValue()));
         }
-        return hsetBytes(ByteSequence.ofUtf8(key), byteMap);
+        return hsetBytes(ByteSequence.ofUtf8(key), pairs);
+    }
+
+    public int hset(String key, String field, String value) {
+        return hset(key, Map.of(field, value));
     }
 
     public ByteSequence hget(ByteSequence key, ByteSequence field) {

@@ -228,6 +228,48 @@ public class RedisDifferentialTest {
         runAndAssert(tc);
     }
 
+    @Test
+    @DisplayName("HASHES: Complete Redis 7.2 Parity (HSET Multi-field/Overwrites/Duplicates, HDEL Multi-field/Pruning)")
+    public void testHashExtendedParity() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("HASH_02", "HASHES", "Extended Hash Parity Options")
+                .withSetup("FLUSHDB")
+                // 1. Multi-field HSET
+                .addStep("HSET diff:hash f1 v1 f2 v2 f3 v3", ":3\r\n")
+                // 2. Overwrite existing field returns 0
+                .addStep("HSET diff:hash f1 v1_mod", ":0\r\n")
+                .addStep("HGET diff:hash f1", "$6\r\nv1_mod\r\n")
+                // 3. Combined overwrite and new field
+                .addStep("HSET diff:hash f1 v1_mod2 f4 v4", ":1\r\n")
+                .addStep("HGET diff:hash f4", "$2\r\nv4\r\n")
+                // 4. Duplicate fields in single command
+                .addStep("HSET diff:hash dup val1 dup val2", ":1\r\n")
+                .addStep("HGET diff:hash dup", "$4\r\nval2\r\n")
+                .addStep("HSET diff:hash dup val3 dup val4", ":0\r\n")
+                .addStep("HGET diff:hash dup", "$4\r\nval4\r\n")
+                // 5. Syntax validation (odd arguments / missing arguments)
+                .addStep("HSET diff:hash bad_arity", "-ERR wrong number of arguments for 'hset' command\r\n")
+                .addStep("HSET diff:hash", "-ERR wrong number of arguments for 'hset' command\r\n")
+                // 6. WRONGTYPE error
+                .addStep("SET diff:str \"hello\"", "+OK\r\n")
+                .addStep("HSET diff:str f v", "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+                // 7. Multi-field HDEL with mixture of existing and missing fields
+                .addStep("HDEL diff:hash f1 f2 missing_field", ":2\r\n")
+                // 8. HDEL on missing fields / missing keys returns 0
+                .addStep("HDEL diff:hash missing1 missing2", ":0\r\n")
+                .addStep("HDEL diff:missing f1 f2", ":0\r\n")
+                // 9. Duplicate fields in HDEL argument list
+                .addStep("HDEL diff:hash f3 f3 f3", ":1\r\n")
+                // 10. HDEL syntax error
+                .addStep("HDEL diff:hash", "-ERR wrong number of arguments for 'hdel' command\r\n")
+                // 11. HDEL against wrong type
+                .addStep("HDEL diff:str f", "-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+                // 12. Deleting final fields removes key
+                .addStep("HDEL diff:hash f4 dup", ":2\r\n")
+                .addStep("EXISTS diff:hash", ":0\r\n");
+
+        runAndAssert(tc);
+    }
+
     // =========================================================================
     // 5. EXPIRATION & LIFECYCLE
     // =========================================================================

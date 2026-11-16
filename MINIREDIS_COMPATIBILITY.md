@@ -75,10 +75,10 @@ Below is the comprehensive audit of all **60 commands implemented in MiniRedis**
 
 | Command | Redis 7.2 Expected Behaviour | MiniRedis Implementation | Compatibility Tier | Test Status | Known Differences / Gaps |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`HSET`** | Sets field(s) in hash. Returns count of newly added fields. | `HSetCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Supports multiple field-value pairs (`HSET k f1 v1 f2 v2`). Auto-creates hash. |
+| **`HSET`** | `HSET key field val [field val ...]` | `HSetCommand` | Implemented, Public-Demo | Passed (HashCommandParityTest, live) | Fully verified Redis 7.2.17 compatible. Multi-field atomicity, duplicate field sequential resolution, returns count of newly created fields, overwrites return 0 but touch watched keys and log to AOF, preserves TTL, binary safe. |
 | **`HGET`** | Returns value of field in hash. Nil if field or key missing. | `HGetCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Fully compatible. |
 | **`HGETALL`** | Returns flat array of field, value pairs. Empty array if missing. | `HGetAllCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Fully compatible. Returns alternating field/value pairs in RESP array. |
-| **`HDEL`** | Removes one or more fields. Returns count of removed fields. | `HDelCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Auto-deletes key when last field removed. Compatible. |
+| **`HDEL`** | `HDEL key field [field ...]` | `HDelCommand` | Implemented, Public-Demo | Passed (HashCommandParityTest, live) | Fully verified Redis 7.2.17 compatible. Multi-field deletion, duplicate field handling, auto-deletes key and TTL when last field is removed, returns count of actually deleted fields, 0-deletion operations do not create false AOF mutations or trigger WATCH aborts. |
 | **`HEXISTS`** | Returns 1 if field exists in hash, 0 otherwise. | `HExistsCommand` | Implemented, Public-Demo | Passed (Phase 2, live) | Fully compatible. |
 
 ---

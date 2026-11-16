@@ -6,9 +6,8 @@ import com.miniredis.storage.ByteSequence;
 import com.miniredis.storage.StorageEngine;
 import com.miniredis.storage.WrongTypeException;
 
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 public class HSetCommand implements Command {
     @Override
@@ -21,17 +20,11 @@ public class HSetCommand implements Command {
         if (args.size() < 3 || (args.size() - 1) % 2 != 0) {
             return RedisResponse.error("ERR wrong number of arguments for 'hset' command");
         }
-        String key = args.get(0);
-        Map<String, String> fieldValues = new LinkedHashMap<>();
-        for (int i = 1; i < args.size(); i += 2) {
-            fieldValues.put(args.get(i), args.get(i + 1));
+        List<ByteSequence> byteArgs = new ArrayList<>(args.size());
+        for (String arg : args) {
+            byteArgs.add(arg != null ? ByteSequence.ofUtf8(arg) : ByteSequence.EMPTY);
         }
-        try {
-            int newFields = storage.hset(key, fieldValues);
-            return RedisResponse.integer(newFields);
-        } catch (WrongTypeException e) {
-            return RedisResponse.error(e.getMessage());
-        }
+        return executeBytes(byteArgs, storage);
     }
 
     @Override
@@ -40,12 +33,9 @@ public class HSetCommand implements Command {
             return RedisResponse.error("ERR wrong number of arguments for 'hset' command");
         }
         ByteSequence key = args.get(0);
-        Map<ByteSequence, ByteSequence> fieldValues = new LinkedHashMap<>((args.size() - 1) / 2);
-        for (int i = 1; i < args.size(); i += 2) {
-            fieldValues.put(args.get(i), args.get(i + 1));
-        }
+        List<ByteSequence> fieldPairs = args.subList(1, args.size());
         try {
-            int newFields = storage.hsetBytes(key, fieldValues);
+            int newFields = storage.hsetBytes(key, fieldPairs);
             return RedisResponse.integer(newFields);
         } catch (WrongTypeException e) {
             return RedisResponse.error(e.getMessage());

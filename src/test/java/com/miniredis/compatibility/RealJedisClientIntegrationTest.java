@@ -12,6 +12,7 @@ import redis.clients.jedis.exceptions.JedisDataException;
 import redis.clients.jedis.params.SetParams;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -229,6 +230,47 @@ public class RealJedisClientIntegrationTest {
             assertEquals(1L, jedis.llen("jedis:list"));
             assertEquals("SECOND_MOD", jedis.lpop("jedis:list"));
             assertNull(jedis.lpop("jedis:list"));
+        }
+    }
+
+    @Test
+    @DisplayName("Jedis: Hash Parity (HSET multi-field, overwrites, HDEL multi-field, non-existent)")
+    public void testHashExtendedOperations() {
+        try (Jedis jedis = createJedisClient()) {
+            // Multi-field HSET
+            Map<String, String> fields = new LinkedHashMap<>();
+            fields.put("f1", "v1");
+            fields.put("f2", "v2");
+            fields.put("f3", "v3");
+            long added = jedis.hset("jedis:hash", fields);
+            assertEquals(3L, added);
+
+            // Overwrite existing field
+            long overwrites = jedis.hset("jedis:hash", "f1", "v1_mod");
+            assertEquals(0L, overwrites);
+            assertEquals("v1_mod", jedis.hget("jedis:hash", "f1"));
+
+            // Multi-field HDEL
+            long deleted = jedis.hdel("jedis:hash", "f1", "f2", "missing_field");
+            assertEquals(2L, deleted);
+
+            // Non-existent HDEL returns 0
+            long delMissing = jedis.hdel("jedis:hash", "missing_field");
+            assertEquals(0L, delMissing);
+
+            // Delete final field
+            long delFinal = jedis.hdel("jedis:hash", "f3");
+            assertEquals(1L, delFinal);
+            assertFalse(jedis.exists("jedis:hash"));
+
+            // Binary safety with byte arrays
+            byte[] bKey = new byte[] { 'b', 'h', 0x00, 0x01 };
+            byte[] bField = new byte[] { 0x00, 'x', '\r', '\n' };
+            byte[] bVal = new byte[] { (byte) 0xFF, (byte) 0xFE, 0x00 };
+            jedis.hset(bKey, bField, bVal);
+            assertArrayEquals(bVal, jedis.hget(bKey, bField));
+            jedis.hdel(bKey, bField);
+            assertFalse(jedis.exists(bKey));
         }
     }
 }

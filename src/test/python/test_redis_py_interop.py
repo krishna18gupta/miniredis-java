@@ -109,6 +109,23 @@ def run_tests(host="127.0.0.1", port=6379):
     client.delete("py:user:42")
     print("  [PASS] Hashes: HSET, HGET, HGETALL, HEXISTS, HDEL")
 
+    # 5b. HASHES EXTENDED: multi-field updates, overwrites, duplicate fields, multi-field HDEL
+    added = client.hset("py:hash:ext", mapping={"f1": "v1", "f2": "v2", "f3": "v3"})
+    assert added == 3, f"Expected 3 new fields, got: {added}"
+    overwritten = client.hset("py:hash:ext", "f1", "v1_mod")
+    assert overwritten == 0, f"Expected 0 for overwrite, got: {overwritten}"
+    assert client.hget("py:hash:ext", "f1") == "v1_mod"
+    # Multi-field HDEL with mixture of existing and missing fields
+    removed = client.hdel("py:hash:ext", "f1", "missing1", "f2", "missing2")
+    assert removed == 2, f"Expected 2 fields removed, got: {removed}"
+    del_missing = client.hdel("py:hash:ext", "missing1", "missing2")
+    assert del_missing == 0, f"Expected 0 for missing fields, got: {del_missing}"
+    # Delete final field: key deleted
+    del_final = client.hdel("py:hash:ext", "f3")
+    assert del_final == 1, f"Expected 1, got: {del_final}"
+    assert client.exists("py:hash:ext") == 0, "Key must be deleted after last field removed"
+    print("  [PASS] Hashes extended: multi-field updates, overwrites, multi-field HDEL, key cleanup")
+
     # 6. EXPIRATION: EXPIRE, TTL, PERSIST
     client.set("py:temp", "ephemeral")
     client.expire("py:temp", 300)
