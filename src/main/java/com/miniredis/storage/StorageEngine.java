@@ -1,5 +1,6 @@
 package com.miniredis.storage;
 
+import com.miniredis.commands.RedisResponse;
 import com.miniredis.concurrency.StripedLockManager;
 
 import java.nio.charset.StandardCharsets;
@@ -251,6 +252,105 @@ public class StorageEngine {
         set(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(value), expireAt);
     }
 
+    public static class SetOptions {
+        public final boolean nx;
+        public final boolean xx;
+        public final boolean get;
+        public final boolean keepTtl;
+        public final Long expireAt;
+        public final boolean hasExpire;
+
+        public SetOptions(boolean nx, boolean xx, boolean get, boolean keepTtl, Long expireAt, boolean hasExpire) {
+            this.nx = nx;
+            this.xx = xx;
+            this.get = get;
+            this.keepTtl = keepTtl;
+            this.expireAt = expireAt;
+            this.hasExpire = hasExpire;
+        }
+    }
+
+    public RedisResponse setExtended(ByteSequence key, ByteSequence value, SetOptions options) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(value, "value cannot be null");
+        try (StripedLockManager.LockHandle ignored = stripedLocks.writeLock(key)) {
+            RedisValue existing = getInternal(key);
+
+            ByteSequence oldValue = null;
+            if (options.get) {
+                if (existing != null) {
+                    if (existing.getType() != RedisDataType.STRING) {
+                        throw new WrongTypeException();
+                    }
+                    oldValue = existing.getAsByteSequence();
+                }
+            }
+
+            if (options.nx && existing != null) {
+                if (options.get) {
+                    return RedisResponse.bulkString(oldValue).withMutated(false);
+                }
+                return RedisResponse.nil().withMutated(false);
+            }
+
+            if (options.xx && existing == null) {
+                return RedisResponse.nil().withMutated(false);
+            }
+
+            Long newExpireAt = null;
+            if (options.keepTtl) {
+                if (existing != null) {
+                    newExpireAt = existing.getExpireAt();
+                }
+            } else if (options.hasExpire) {
+                newExpireAt = options.expireAt;
+            }
+
+            long now = now();
+            if (newExpireAt != null && newExpireAt <= now) {
+                boolean removed = (store.remove(key) != null);
+                if (removed) {
+                    bumpKeyVersion(key);
+                }
+                RedisResponse resp = options.get
+                        ? (oldValue != null ? RedisResponse.bulkString(oldValue) : RedisResponse.nil())
+                        : RedisResponse.ok();
+                return resp.withMutated(removed);
+            }
+
+            RedisValue newVal = RedisValue.ofByteSequence(value);
+            if (newExpireAt != null) {
+                newVal.setExpireAt(newExpireAt);
+            }
+            store.put(key, newVal);
+            bumpKeyVersion(key);
+
+            if (options.get) {
+                return (oldValue != null) ? RedisResponse.bulkString(oldValue) : RedisResponse.nil();
+            }
+            return RedisResponse.ok();
+        }
+    }
+
+    public RedisResponse setExtended(String key, String value, SetOptions options) {
+        Objects.requireNonNull(key, "key cannot be null");
+        Objects.requireNonNull(value, "value cannot be null");
+        return setExtended(ByteSequence.ofUtf8(key), ByteSequence.ofUtf8(value), options);
+    }
+
+    public Long getExpireAt(ByteSequence key) {
+        if (key == null) return null;
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
+            RedisValue val = getInternal(key);
+            return (val != null) ? val.getExpireAt() : null;
+        }
+    }
+
+    public Long getExpireAt(String key) {
+        if (key == null) return null;
+        return getExpireAt(ByteSequence.ofUtf8(key));
+    }
+
     public void put(ByteSequence key, RedisValue value) {
         Objects.requireNonNull(key, "key cannot be null");
         Objects.requireNonNull(value, "value cannot be null");
@@ -326,6 +426,18 @@ public class StorageEngine {
             byteKeys.add(ByteSequence.ofUtf8(k));
         }
         return existsBytes(byteKeys);
+    }
+
+    public boolean exists(ByteSequence key) {
+        if (key == null) return false;
+        try (StripedLockManager.LockHandle ignored = stripedLocks.readLock(key)) {
+            return getInternal(key) != null;
+        }
+    }
+
+    public boolean exists(String key) {
+        if (key == null) return false;
+        return exists(ByteSequence.ofUtf8(key));
     }
 
     public Set<String> keys(String globPattern) {

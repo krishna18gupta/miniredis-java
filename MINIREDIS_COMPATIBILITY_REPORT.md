@@ -26,10 +26,10 @@ To ground this mission in technical reality, we strictly categorize commands int
 - **Target Standalone Core Scope (Redis 7.2 Basic Operations):** 75 core commands (Strings, Hashes, Lists, Sets, Keys, Expiration, Transactions, Server Utilities).
   - *Excludes optional modules:* Streams, Pub/Sub, Cluster, Lua Scripting, Functions, Bitmaps, HyperLogLog, Geospatial.
 - **Commands Implemented in MiniRedis:** **57**
-- **Commands Passing Differential Verification:** **48**
-- **Commands Partially Compatible:** **9** (Feature gaps in secondary flags such as `SET NX/XX/GET`, multi-DB `SELECT`, etc.)
-- **Core Scope Compatibility Ratio:** **$64.0\%$** ($48 / 75$)
-- **Implemented Scope Compatibility Ratio:** **$84.2\%$** ($48 / 57$)
+- **Commands Passing Differential Verification:** **49**
+- **Commands Partially Compatible:** **8** (Feature gaps in secondary flags such as multi-DB `SELECT`, List count pops, etc.)
+- **Core Scope Compatibility Ratio:** **$65.3\%$** ($49 / 75$)
+- **Implemented Scope Compatibility Ratio:** **$86.0\%$** ($49 / 57$)
 
 ---
 
@@ -147,8 +147,8 @@ During Stage 3 and Stage 4 differential testing, two concrete compatibility gaps
 
 | Area | Redis 7.2 Standalone | MiniRedis Engine | Technical Impact |
 | :--- | :--- | :--- | :--- |
-| **Encoding Model** | Binary-safe C SDS byte buffers | Java UTF-8 `String` in `RedisValue` | Arbitrary non-UTF8 binary data (e.g. compressed files, images) undergoes UTF-8 decoding. True binary-safe byte array values planned for Phase 18. |
-| **`SET` Options** | Supports `[NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT\|KEEPTTL]` | Supports `[EX\|PX\|EXAT\|PXAT]` | `NX`, `XX`, `GET`, and `KEEPTTL` are not yet implemented. |
+| **Encoding Model** | Binary-safe C SDS byte buffers | Native immutable `ByteSequence` throughout pipeline | **VERIFIED COMPATIBLE**: Completed in Stage A. Binary payloads containing `\x00`, CRLF, and non-UTF-8 bytes preserved without loss. |
+| **`SET` Options** | Supports `[NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT\|KEEPTTL]` | Supports `[NX\|XX] [GET] [EX\|PX\|EXAT\|PXAT\|KEEPTTL]` | **VERIFIED COMPATIBLE**: Completed in Stage B. 100% parity with Redis 7.2.17 standalone syntax, semantics, and AOF normalization. |
 | **Multiple Databases**| Supports DB 0 through 15 | Only DB 0 active; `SELECT 0` returns OK, `SELECT > 0` returns error | Single database standalone operation. |
 | **List Bulk Pops** | `LPOP key [count]`, `RPOP key [count]` (Redis 6.2+) | Single element pop only | Multi-element popping requires multiple single pop calls. |
 | **Hash Increments** | `HINCRBY key field increment` | Not yet implemented | Hash field increments require client-side get-increment-set. |

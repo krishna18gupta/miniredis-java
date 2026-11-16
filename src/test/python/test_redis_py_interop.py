@@ -42,6 +42,24 @@ def run_tests(host="127.0.0.1", port=6379):
     assert del_count == 2, f"DELETE failed: {del_count}"
     print("  [PASS] DEL multiple keys")
 
+    # 2b. STRINGS: SET with options (NX, XX, GET, EX, KEEPTTL)
+    res_nx1 = client.set("py:opt", "val1", nx=True)
+    assert res_nx1 is True, f"SET NX failed on new key: {res_nx1}"
+    res_nx2 = client.set("py:opt", "val2", nx=True)
+    assert res_nx2 is None, f"SET NX expected None on existing key: {res_nx2}"
+    res_xx = client.set("py:opt", "val3", xx=True)
+    assert res_xx is True, f"SET XX failed on existing key: {res_xx}"
+    res_get = client.set("py:opt", "val4", get=True, ex=300)
+    assert res_get == "val3", f"SET GET expected val3, got: {res_get}"
+    opt_ttl = client.ttl("py:opt")
+    assert 0 < opt_ttl <= 300, f"TTL failed: {opt_ttl}"
+    res_kt = client.set("py:opt", "val5", keepttl=True)
+    assert res_kt is True, f"SET KEEPTTL failed: {res_kt}"
+    opt_ttl2 = client.ttl("py:opt")
+    assert 0 < opt_ttl2 <= 300, f"KEEPTTL failed: {opt_ttl2}"
+    client.delete("py:opt")
+    print("  [PASS] SET options: NX, XX, GET, EX, KEEPTTL")
+
     # 3. LISTS: RPUSH, LRANGE, LLEN, LPOP
     client.rpush("py:jobs", "job1", "job2", "job3")
     assert client.llen("py:jobs") == 3

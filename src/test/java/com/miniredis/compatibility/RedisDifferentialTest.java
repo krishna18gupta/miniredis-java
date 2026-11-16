@@ -92,6 +92,29 @@ public class RedisDifferentialTest {
         runAndAssert(tc);
     }
 
+    @Test
+    @DisplayName("STRINGS: SET Extended Parity (NX, XX, GET, KEEPTTL, Syntax Validation)")
+    public void testSetExtendedParity() throws IOException {
+        DifferentialTestCase tc = new DifferentialTestCase("STR_04", "STRINGS", "SET Extended Parity Options")
+                .withSetup("FLUSHDB")
+                .addStep("SET diff_k1 v1 NX", "+OK\r\n")
+                .addStep("SET diff_k1 v2 NX", "$-1\r\n")
+                .addStep("GET diff_k1", "$2\r\nv1\r\n")
+                .addStep("SET diff_k1 v3 XX", "+OK\r\n")
+                .addStep("GET diff_k1", "$2\r\nv3\r\n")
+                .addStep("SET diff_k2 v_miss XX", "$-1\r\n")
+                .addStep("SET diff_k1 v4 GET", "$2\r\nv3\r\n")
+                .addStep("GET diff_k1", "$2\r\nv4\r\n")
+                .addStep("SET diff_k3 v_first GET", "$-1\r\n")
+                .addStep("GET diff_k3", "$7\r\nv_first\r\n")
+                .addStep("SET diff_k1 v5 NX XX", "-ERR syntax error\r\n")
+                .addStep("SET diff_k1 v5 EX 0", "-ERR invalid expire time in 'set' command\r\n")
+                .addStep("SET diff_k1 v5 EX abc", "-ERR value is not an integer or out of range\r\n")
+                .addStep("SET diff_k1 v5 KEEPTTL", "+OK\r\n");
+
+        runAndAssert(tc);
+    }
+
     // =========================================================================
     // 2. LISTS
     // =========================================================================

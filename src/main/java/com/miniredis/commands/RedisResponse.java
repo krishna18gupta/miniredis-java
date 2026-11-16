@@ -27,13 +27,19 @@ public class RedisResponse {
     private final ByteSequence byteValue;
     private final Long intValue;
     private final List<RedisResponse> arrayValue;
+    private final boolean mutated;
 
-    private RedisResponse(ResponseType type, String stringValue, ByteSequence byteValue, Long intValue, List<RedisResponse> arrayValue) {
+    private RedisResponse(ResponseType type, String stringValue, ByteSequence byteValue, Long intValue, List<RedisResponse> arrayValue, boolean mutated) {
         this.type = type;
         this.stringValue = stringValue;
         this.byteValue = byteValue;
         this.intValue = intValue;
         this.arrayValue = arrayValue;
+        this.mutated = mutated;
+    }
+
+    private RedisResponse(ResponseType type, String stringValue, ByteSequence byteValue, Long intValue, List<RedisResponse> arrayValue) {
+        this(type, stringValue, byteValue, intValue, arrayValue, true);
     }
 
     // Factory methods
@@ -138,6 +144,17 @@ public class RedisResponse {
 
     public List<RedisResponse> getArrayValue() {
         return arrayValue;
+    }
+
+    public boolean isMutated() {
+        return mutated;
+    }
+
+    public RedisResponse withMutated(boolean mutated) {
+        if (this.mutated == mutated) {
+            return this;
+        }
+        return new RedisResponse(this.type, this.stringValue, this.byteValue, this.intValue, this.arrayValue, mutated);
     }
 
     /**

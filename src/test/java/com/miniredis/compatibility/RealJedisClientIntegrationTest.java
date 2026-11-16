@@ -9,6 +9,7 @@ import redis.clients.jedis.HostAndPort;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.RedisProtocol;
 import redis.clients.jedis.exceptions.JedisDataException;
+import redis.clients.jedis.params.SetParams;
 
 import java.io.IOException;
 import java.util.List;
@@ -155,6 +156,40 @@ public class RealJedisClientIntegrationTest {
             assertTrue(jedis2.isConnected() || jedis2.ping().equals("PONG"));
             assertEquals("string_val", jedis2.get("jedis:scalar"));
             jedis2.del("jedis:scalar");
+        }
+    }
+
+    @Test
+    @DisplayName("Jedis: SET with Extended Options (NX, XX, GET, EX, PX, KEEPTTL)")
+    public void testSetExtendedOptions() {
+        try (Jedis jedis = createJedisClient()) {
+            // 1. SET with NX on new key
+            String res1 = jedis.set("jedis:opt:1", "val1", SetParams.setParams().nx());
+            assertEquals("OK", res1);
+
+            // 2. SET with NX on existing key -> null (nil)
+            String res2 = jedis.set("jedis:opt:1", "val2", SetParams.setParams().nx());
+            assertNull(res2);
+            assertEquals("val1", jedis.get("jedis:opt:1"));
+
+            // 3. SET with XX on existing key
+            String res3 = jedis.set("jedis:opt:1", "val3", SetParams.setParams().xx());
+            assertEquals("OK", res3);
+            assertEquals("val3", jedis.get("jedis:opt:1"));
+
+            // 4. SET with EX and GET
+            String res4 = jedis.setGet("jedis:opt:1", "val4", SetParams.setParams().ex(120));
+            assertEquals("val3", res4);
+            assertEquals("val4", jedis.get("jedis:opt:1"));
+            assertTrue(jedis.ttl("jedis:opt:1") > 0);
+
+            // 5. SET with KEEPTTL
+            String res5 = jedis.set("jedis:opt:1", "val5", SetParams.setParams().keepttl());
+            assertEquals("OK", res5);
+            assertEquals("val5", jedis.get("jedis:opt:1"));
+            assertTrue(jedis.ttl("jedis:opt:1") > 0);
+
+            jedis.del("jedis:opt:1");
         }
     }
 }

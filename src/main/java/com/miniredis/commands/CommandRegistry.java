@@ -344,7 +344,7 @@ public class CommandRegistry {
                     } else {
                         if (storage != null) {
                             storage.incrementCompletedOperations();
-                            if (isMutatingCommand(cmdName)) {
+                            if (isMutatingCommand(cmdName) && resp.isMutated()) {
                                 List<ByteSequence> normalized = normalizeForAofBytes(queued, storage);
                                 if (normalized != null) {
                                     mutatingAofCommands.add(normalized);
@@ -410,7 +410,9 @@ public class CommandRegistry {
                 } else {
                     if (storage != null) {
                         storage.incrementCompletedOperations();
-                        logToAofIfMutatingBytes(tokens, storage);
+                        if (resp.isMutated()) {
+                            logToAofIfMutatingBytes(tokens, storage);
+                        }
                     }
                 }
                 return resp;
@@ -512,18 +514,7 @@ public class CommandRegistry {
                 }
                 return null;
             case "SET":
-                if (args.size() < 2) {
-                    return RedisResponse.error("ERR wrong number of arguments for 'set' command");
-                }
-                for (int i = 2; i < args.size(); i++) {
-                    String opt = args.get(i).toUtf8String().toUpperCase(Locale.ROOT);
-                    if (("EX".equals(opt) || "PX".equals(opt) || "EXAT".equals(opt) || "PXAT".equals(opt)) && i + 1 < args.size()) {
-                        i++;
-                    } else {
-                        return RedisResponse.error("ERR syntax error");
-                    }
-                }
-                return null;
+                return SetCommand.validateSyntaxBytes(args);
             case "LPUSH":
             case "RPUSH":
             case "SADD":
@@ -665,23 +656,20 @@ public class CommandRegistry {
                 }
                 return null;
             case "SET":
-                if (tokens.size() >= 5) {
-                    String opt = tokens.get(3).toUtf8String().toUpperCase(Locale.ROOT);
-                    try {
-                        if ("EX".equals(opt)) {
-                            long sec = Long.parseLong(tokens.get(4).toUtf8String());
-                            return List.of(ByteSequence.ofAscii("SET"), tokens.get(1), tokens.get(2),
-                                           ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(now + sec * 1000L)));
-                        } else if ("PX".equals(opt)) {
-                            long ms = Long.parseLong(tokens.get(4).toUtf8String());
-                            return List.of(ByteSequence.ofAscii("SET"), tokens.get(1), tokens.get(2),
-                                           ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(now + ms)));
-                        }
-                    } catch (NumberFormatException ignored) {
-                        return null;
+                if (tokens.size() < 3) return null;
+                ByteSequence setKey = tokens.get(1);
+                ByteSequence setVal = tokens.get(2);
+                if (storage.exists(setKey)) {
+                    Long exp = storage.getExpireAt(setKey);
+                    if (exp != null) {
+                        return List.of(ByteSequence.ofAscii("SET"), setKey, setVal,
+                                       ByteSequence.ofAscii("PXAT"), ByteSequence.ofAscii(String.valueOf(exp)));
+                    } else {
+                        return List.of(ByteSequence.ofAscii("SET"), setKey, setVal);
                     }
+                } else {
+                    return List.of(ByteSequence.ofAscii("DEL"), setKey);
                 }
-                return tokens;
             case "DEL":
             case "FLUSHDB":
             case "MSET":
